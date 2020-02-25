@@ -26,7 +26,14 @@
 #ifndef _BMK_CORE_STRING_H_
 #define _BMK_CORE_STRING_H_
 
-void *bmk_memcpy(void *, const void *, unsigned long);
+void *bmk_mempcpy(void *, const void *, unsigned long);
+
+static inline void *bmk_memcpy(void *d, const void *s, unsigned long n)
+{
+	bmk_mempcpy(d, s, n);
+	return d;
+}
+
 void *bmk_memset(void *, int, unsigned long);
 void *bmk_memchr(const void *, int, unsigned long);
 void *bmk_memrchr(const void *, int, unsigned long);

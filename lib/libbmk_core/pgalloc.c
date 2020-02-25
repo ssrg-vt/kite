@@ -66,6 +66,7 @@
 #include <bmk-core/printf.h>
 #include <bmk-core/queue.h>
 #include <bmk-core/string.h>
+#include <bmk-core/simple_lock.h>
 
 #include <bmk-pcpu/pcpu.h>
 
@@ -79,6 +80,10 @@ int bmk_pgalloc_debug = 0;
 #endif
 
 unsigned long pgalloc_totalkb, pgalloc_usedkb;
+
+static bmk_simple_lock_t pgalloc_slock = BMK_SIMPLE_LOCK_INITIALIZER;
+#define pgalloc_lock()		bmk_simple_lock_enter(&pgalloc_slock)
+#define pgalloc_unlock()	bmk_simple_lock_exit(&pgalloc_slock)
 
 /*
  * The allocation bitmap is offset to the first page loaded, which is
@@ -243,6 +248,7 @@ sanity_check(void)
 }
 #endif
 
+#if 0
 void
 bmk_pgalloc_dumpstats(void)
 {
@@ -271,6 +277,7 @@ bmk_pgalloc_dumpstats(void)
 		    (100*levelhas)/remainingkb);
 	}
 }
+#endif
 
 static void
 carverange(unsigned long addr, unsigned long range)
@@ -366,7 +373,6 @@ satisfies_p(int i, unsigned long align)
 void *
 bmk_pgalloc(int order)
 {
-
 	return bmk_pgalloc_align(order, BMK_PCPU_PAGE_SIZE);
 }
 
@@ -380,11 +386,13 @@ bmk_pgalloc_align(int order, unsigned long align)
 	bmk_assert(align >= BMK_PCPU_PAGE_SIZE && (align & (align-1)) == 0);
 	bmk_assert((unsigned)order < FREELIST_LEVELS);
 
+	pgalloc_lock();
 	for (bucket = order; bucket < FREELIST_LEVELS; bucket++) {
 		if ((alloc_ch = satisfies_p(bucket, align)) != NULL)
 			break;
 	}
 	if (!alloc_ch) {
+		pgalloc_unlock();
 		bmk_printf("cannot handle page request order %d/0x%lx!\n",
 		    order, align);
 		return 0;
@@ -422,6 +430,7 @@ bmk_pgalloc_align(int order, unsigned long align)
 #endif
 
 	SANITY_CHECK();
+	pgalloc_unlock();
 
 	bmk_assert(((unsigned long)alloc_ch & (align-1)) == 0);
 	return alloc_ch;
@@ -436,6 +445,7 @@ bmk_pgfree(void *pointer, int order)
 	DPRINTF(("bmk_pgfree: freeing 0x%lx bytes at %p\n",
 	    order2size(order), pointer));
 
+	pgalloc_lock();
 #ifdef BMK_PGALLOC_DEBUG
 	{
 		unsigned npgs = 1<<order;
@@ -484,4 +494,5 @@ bmk_pgfree(void *pointer, int order)
 	freechunk_link(freed_ch, order);
 
 	SANITY_CHECK();
+	pgalloc_unlock();
 }

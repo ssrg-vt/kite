@@ -124,6 +124,4 @@ multiboot(struct multiboot_info *mbi)
 
 	if (parsemem(mbi->mmap_addr, mbi->mmap_length) != 0)
 		bmk_platform_halt("multiboot memory parse failed");
-
-	intr_init();
 }

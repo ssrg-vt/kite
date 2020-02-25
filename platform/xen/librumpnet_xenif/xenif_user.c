@@ -118,7 +118,7 @@ pusher(void *arg)
 			viu->viu_rcvr = bmk_current;
 			bmk_sched_blockprepare();
 			local_irq_restore(flags);
-			bmk_sched_block();
+			bmk_sched_block(NULL);
 			local_irq_save(flags);
 			viu->viu_rcvr = NULL;
 			goto again;
@@ -164,7 +164,7 @@ VIFHYPER_CREATE(int devnum, struct virtif_sc *vif_sc, uint8_t *enaddr,
 	}
 
 	viu->viu_thr = bmk_sched_create("xenifp",
-	    NULL, 1, pusher, viu, NULL, 0);
+	    NULL, 1, -1, pusher, viu, NULL, 0);
 	if (viu->viu_thr == NULL) {
 		minios_printk("fatal thread creation failure\n"); /* XXX */
 		minios_do_exit();

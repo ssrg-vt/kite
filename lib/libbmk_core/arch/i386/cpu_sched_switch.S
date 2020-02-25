@@ -55,11 +55,10 @@ ENTRY(bmk_cpu_sched_switch)
 	pushl %ebx
 	pushl %esi
 	pushl %edi
+	pushl $1f			/* save EIP */
 	movl %esp, (%ecx)		/* save ESP */
 	movl (%edx), %esp		/* restore ESP */
-	movl $1f, 4(%ecx)		/* save EIP */
-	pushl 4(%edx)			/* restore EIP */
-	ret
+	ret				/* restore EIP */
 1:
 	popl %edi
 	popl %esi

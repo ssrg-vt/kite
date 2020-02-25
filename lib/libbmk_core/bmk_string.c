@@ -106,19 +106,45 @@ bmk_memset(void *b, int c, unsigned long n)
 	return b;
 }
 
+#ifdef __i386__
+# define NETDOM_MOVS "movsd"
+#elif __x86_64__
+# define NETDOM_MOVS "movsq"
+#endif
+
 void *
-bmk_memcpy(void *d, const void *src, unsigned long n)
+bmk_mempcpy(void *d, const void *src, unsigned long n)
 {
-	unsigned char *dp;
-	const unsigned char *sp;
-
-	dp = d;
-	sp = src;
-
+	unsigned char *dp = d;
+	const unsigned char *sp = src;
+#if defined(__i386__) || defined(__x86_64__)
+	unsigned long units = n;
+	if (units >= 48) {
+		/* Align as necessary */
+		while ((unsigned long) dp & (sizeof(unsigned long) - 1)) {
+			*dp++ = *sp++;
+			n--;
+		}
+		units = n / sizeof(unsigned long);
+		__asm__ __volatile__ (
+			"rep " NETDOM_MOVS
+			: "+D" (dp), "+S" (sp), "+c" (units)
+			:
+			: "cc", "memory"
+		);
+		units = n & (sizeof(unsigned long) - 1);
+	}
+	__asm__ __volatile__ (
+		"rep movsb"
+		: "+D" (dp), "+S" (sp), "+c" (units)
+		:
+		: "cc", "memory"
+	);
+#else
 	while (n--)
 		*dp++ = *sp++;
-
-	return d;
+#endif
+	return dp;
 }
 
 void *

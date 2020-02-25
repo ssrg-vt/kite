@@ -31,6 +31,7 @@
 
 #include <sys/cdefs.h>
 
+#include <sys/types.h>
 #include <sys/param.h>
 #include <sys/errno.h>
 #include <sys/file.h>
@@ -41,6 +42,8 @@
 #include <sys/syscall.h>
 #include <sys/syscallargs.h>
 
+#include <bmk-core/simple_lock.h>
+
 #include "rump_private.h"
 
 #ifdef RUMPRUN_MMAP_DEBUG
@@ -48,6 +51,8 @@
 #else
 #define MMAP_PRINTF(x)
 #endif
+
+static bmk_simple_lock_t mmapmem_lock = BMK_SIMPLE_LOCK_INITIALIZER;
 
 struct mmapchunk {
 	void *mm_start;
@@ -78,7 +83,9 @@ mmapmem_alloc(size_t roundedlen)
 	mc->mm_size = roundedlen;
 	mc->mm_pgsleft = roundedlen / PAGE_SIZE;
 
+	bmk_simple_lock_enter(&mmapmem_lock);
 	LIST_INSERT_HEAD(&mmc_list, mc, mm_chunks);
+	bmk_simple_lock_exit(&mmapmem_lock);
 
 	return v;
 }
@@ -88,7 +95,9 @@ mmapmem_free(void *addr, size_t roundedlen)
 {
 	struct mmapchunk *mc;
 	size_t npgs;
+	int err = 0;
 
+	bmk_simple_lock_enter(&mmapmem_lock);
 	LIST_FOREACH(mc, &mmc_list, mm_chunks) {
 		if (mc->mm_start <= addr &&
 		    ((uint8_t *)mc->mm_start + mc->mm_size
@@ -96,21 +105,28 @@ mmapmem_free(void *addr, size_t roundedlen)
 			break;
 	}
 	if (!mc) {
-		return EINVAL;
+		err = EINVAL;
+		goto done;
 	}
 
 	npgs = roundedlen / PAGE_SIZE;
 	KASSERT(npgs <= mc->mm_pgsleft);
 	mc->mm_pgsleft -= npgs;
-	if (mc->mm_pgsleft)
-		return 0;
+	if (mc->mm_pgsleft) {
+		mc = NULL;
+		goto done;
+	}
 
 	/* no pages left => free bookkeeping chunk */
 	LIST_REMOVE(mc, mm_chunks);
-	kmem_free(mc->mm_start, mc->mm_size);
-	kmem_free(mc, sizeof(*mc));
 
-	return 0;
+done:
+	bmk_simple_lock_exit(&mmapmem_lock);
+	if (mc) {
+		kmem_free(mc->mm_start, mc->mm_size);
+		kmem_free(mc, sizeof(*mc));
+	}
+	return err;
 }
 
 int

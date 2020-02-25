@@ -12,7 +12,7 @@ CFLAGS+=	-mno-sse -mno-mmx
 
 # squash all interrupts to a single level to
 # avoid having to figure out routing
-CFLAGS+=	-DBMK_SCREW_INTERRUPT_ROUTING
+# CFLAGS+=	-DBMK_SCREW_INTERRUPT_ROUTING
 
 .PHONY: archdirs
 archdirs:

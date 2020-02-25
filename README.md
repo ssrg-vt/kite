@@ -1,5 +1,10 @@
-Rumprun [![Build Status](https://travis-ci.org/rumpkernel/rumprun.svg?branch=master)](https://travis-ci.org/rumpkernel/rumprun)
-=======
+Rumprun SMP
+==========
+
+This repository contains a fork of [rumprun](https://github.com/rumpkernel/rumprun). This version of rumprun includes SMP support for the ``hw'' platform
+of rumprun. The SMP support is provided by Ruslan Nikolaev, Virginia Tech.
+Below is the README file that was provided with the original version of
+rumprun by Antti Kantee.
 
 This repository uses [rump kernels](http://rumpkernel.org) to provide
 the Rumprun [unikernel](https://en.wikipedia.org/wiki/Unikernel).

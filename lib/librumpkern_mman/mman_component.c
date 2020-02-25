@@ -55,6 +55,5 @@ static const struct rump_onesyscall mysys[] = {
 
 RUMP_COMPONENT(RUMP_COMPONENT_SYSCALL)
 {
-
 	rump_syscall_boot_establish(mysys, __arraycount(mysys));
 }

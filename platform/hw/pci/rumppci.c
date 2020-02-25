@@ -27,6 +27,7 @@
 #include <hw/kernel.h>
 
 #include <bmk-core/pgalloc.h>
+#include <bmk-core/simple_lock.h>
 
 #include <bmk-pcpu/pcpu.h>
 
@@ -36,6 +37,8 @@
 
 #define PCI_CONF_ADDR 0xcf8
 #define PCI_CONF_DATA 0xcfc
+
+static bmk_simple_lock_t pciconf_lock = BMK_SIMPLE_LOCK_INITIALIZER;
 
 int
 rumpcomp_pci_iospace_init(void)
@@ -59,8 +62,10 @@ rumpcomp_pci_confread(unsigned bus, unsigned dev, unsigned fun, int reg,
 	unsigned int data;
 
 	addr = makeaddr(bus, dev, fun, reg);
+	bmk_simple_lock_enter(&pciconf_lock);
 	outl(PCI_CONF_ADDR, addr);
 	data = inl(PCI_CONF_DATA);
+	bmk_simple_lock_exit(&pciconf_lock);
 
 	*value = data;
 	return 0;
@@ -73,8 +78,10 @@ rumpcomp_pci_confwrite(unsigned bus, unsigned dev, unsigned fun, int reg,
 	uint32_t addr;
 
 	addr = makeaddr(bus, dev, fun, reg);
+	bmk_simple_lock_enter(&pciconf_lock);
 	outl(PCI_CONF_ADDR, addr);
 	outl(PCI_CONF_DATA, value);
+	bmk_simple_lock_exit(&pciconf_lock);
 
 	return 0;
 }

@@ -78,7 +78,7 @@ struct tss {
 	unsigned int	tss_reserved4;
 } __attribute__((__packed__)) mytss;
 
-static struct gate_descriptor idt[256];
+static struct gate_descriptor idt[256] __attribute__ ((aligned(16)));
 
 extern unsigned long cpu_gdt64[];
 
@@ -102,9 +102,29 @@ x86_fillgate(int num, void *fun, int ist)
 	gd->gd_xx3 = 0;
 }
 
+#if 0
 static char intrstack[4096];
 static char nmistack[4096];
 static char dfstack[4096];
+#endif
+
+static inline void
+_init_taskgate(unsigned long cpu)
+{
+	unsigned long d = 4 + cpu * 2; /* TSS descriptor offset. */
+	struct taskgate_descriptor *td = (void *)&cpu_gdt64[d];
+
+	td->td_lolimit = 0;
+	td->td_lobase = 0;
+	td->td_type = 0x9;
+	td->td_dpl = 0;
+	td->td_p = 1;
+	td->td_hilimit = 0xf;
+	td->td_gran = 0;
+	td->td_hibase = 0xffffffffffUL;
+	td->td_zero = 0;
+	amd64_ltr(d*8);
+}
 
 /*
  * This routine fills out the interrupt descriptors so that
@@ -122,26 +142,32 @@ cpu_init(void)
 
 	x86_initpic();
 
+#if 0
 	/*
 	 * fill TSS
 	 */
 	mytss.tss_ist[0] = (unsigned long)intrstack + sizeof(intrstack)-16;
 	mytss.tss_ist[1] = (unsigned long)nmistack + sizeof(nmistack)-16;
 	mytss.tss_ist[2] = (unsigned long)dfstack + sizeof(dfstack)-16;
+#endif
 
-	struct taskgate_descriptor *td = (void *)&cpu_gdt64[4];
-	td->td_lolimit = 0;
-	td->td_lobase = 0;
-	td->td_type = 0x9;
-	td->td_dpl = 0;
-	td->td_p = 1;
-	td->td_hilimit = 0xf;
-	td->td_gran = 0;
-	td->td_hibase = 0xffffffffffUL;
-	td->td_zero = 0;
-	amd64_ltr(4*8);
+	_init_taskgate(0);
 
 	x86_initclocks();
+}
+
+void
+cpu_init_notmain(unsigned long cpu)
+{
+	struct region_descriptor region;
+
+	region.rd_limit = sizeof(idt)-1;
+	region.rd_base = (uintptr_t)(void *)idt;
+	amd64_lidt(&region);
+
+	_init_taskgate(cpu);
+
+	x86_initclocks_notmain();
 }
 
 void cpu_fattrap(const char *, void *, unsigned long);

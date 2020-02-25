@@ -474,7 +474,7 @@ void xenevt_dev_init(void)
 {
 	mutex_init(&devevent_lock, MUTEX_DEFAULT, IPL_NONE);
 	minios_events_register_rump_callback(rump_evtdev_callback);
-	bmk_sched_create("xenevt", NULL, 0, xenevt_thread_func, NULL,
+	bmk_sched_create("xenevt", NULL, 0, -1, xenevt_thread_func, NULL,
 			 NULL, 0);
 }
 

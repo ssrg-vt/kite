@@ -12,6 +12,7 @@ void cons_putc(int);
 void cons_puts(const char *);
 
 void cpu_init(void);
+void cpu_init_notmain(unsigned long);
 void cpu_block(bmk_time_t);
 int cpu_intr_init(int);
 void cpu_intr_ack(unsigned);
@@ -33,5 +34,8 @@ extern char multiboot_cmdline[];
 #include <bmk-core/errno.h>
 
 #define BMK_MAXINTR	32
+
+/* 64 CPUs for now. */
+#define BMK_MAXCPUS	64
 
 #define HZ 100

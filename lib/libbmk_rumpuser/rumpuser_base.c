@@ -73,7 +73,7 @@ rumpuser_getparam(const char *name, void *buf, size_t buflen)
 		bmk_strcpy(buf, "1");
 
 	} else if (bmk_strcmp(name, RUMPUSER_PARAM_NCPU) == 0) {
-		bmk_strcpy(buf, "1");
+		bmk_snprintf(buf, buflen, "%lu", bmk_numcpus);
 
 	} else if (bmk_strcmp(name, RUMPUSER_PARAM_HOSTNAME) == 0) {
 		bmk_strncpy(buf, "rumprun", buflen-1);

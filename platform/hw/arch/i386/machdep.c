@@ -49,7 +49,7 @@ struct gate_descriptor {
 	unsigned gd_hioffset:16;
 } __attribute__((__packed__));
 
-static struct gate_descriptor idt[256];
+static struct gate_descriptor idt[256] __attribute__ ((aligned(16)));
 
 /* interrupt-not-service-routine */
 void cpu_insr(void);
@@ -152,6 +152,12 @@ cpu_init(void)
 	x86_initpic();
 
 	x86_initclocks();
+}
+
+void
+cpu_init_notmain(unsigned long cpu)
+{
+	/* Empty for now */
 }
 
 void

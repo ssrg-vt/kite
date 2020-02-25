@@ -38,11 +38,11 @@ END(bmk_cpu_sched_bouncer)
  */
 ENTRY(bmk_cpu_sched_switch)
 	push {r4-r12,r14}		/* save non-scratch regs except sp+pc */
+	adr r2, 1f			/* save pc */
+	push {r2}
 	str sp, [r0, #0]		/* save sp */
 	ldr sp, [r1, #0]		/* restore sp */
-	adr r2, 1f			/* save pc */
-	str r2, [r0, #4]
-	ldr pc, [r1, #4]		/* restore pc */
+	pop {pc}			/* restore pc */
 
 1:
 	pop {r4-r12,r14}		/* restore registers */

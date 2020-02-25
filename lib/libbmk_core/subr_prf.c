@@ -49,6 +49,7 @@
 #include <bmk-core/null.h>
 #include <bmk-core/printf.h>
 #include <bmk-core/string.h>
+#include <bmk-core/simple_lock.h>
 
 #define TOBUFONLY	0x01
 #define TOCONS		0x02
@@ -77,10 +78,11 @@ nullfun(void)
 static void (*v_flush)(void);
 static void (*v_putc)(int);
 
+static bmk_simple_lock_t kprintf_slock = BMK_SIMPLE_LOCK_INITIALIZER;
+
 void
 bmk_printf_init(void (*putc)(int), void (*flush)(void))
 {
-
 	if (putc == NULL)
 		putc = (void *)nullfun;
 	v_putc = putc;
@@ -120,18 +122,16 @@ cons_putchar(int c, int flags)
 	(*v_putc)(c);
 }
 
-static void
+static inline void
 kprintf_lock(void)
 {
-
-	/* XXX */
+	bmk_simple_lock_enter(&kprintf_slock);
 }
 
-static void
+static inline void
 kprintf_unlock(void)
 {
-
-	/* XXX */
+	bmk_simple_lock_exit(&kprintf_slock);
 }
 
 /*

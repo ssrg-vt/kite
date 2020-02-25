@@ -47,6 +47,8 @@ ENTRY(_start)
 	/* save BIOS data area values */
 	movw BIOS_COM1_BASE, %bx
 	movw %bx, bios_com1_base
+	movw BIOS_EBDA_BASE, %bx
+	movw %bx, bios_ebda_base
 	movw BIOS_CRTC_BASE, %bx
 	movw %bx, bios_crtc_base
 
@@ -210,8 +212,11 @@ ENTRY(x86_isr_##intnum)							\
 	iret								;\
 END(x86_isr_##intnum)
 
+INTRSTUB(5)
+INTRSTUB(7)
 INTRSTUB(9)
 INTRSTUB(10)
 INTRSTUB(11)
+INTRSTUB(12)
 INTRSTUB(14)
 INTRSTUB(15)

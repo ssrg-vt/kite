@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2014 Antti Kantee.  All Rights Reserved.
+ * Copyright (c) 2018 Ruslan Nikolaev.  All Rights Reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,6 +31,7 @@
 #include <bmk-core/printf.h>
 #include <bmk-core/queue.h>
 #include <bmk-core/sched.h>
+#include <bmk-core/platform.h>
 
 #include <bmk-rumpuser/core_types.h>
 #include <bmk-rumpuser/rumpuser.h>
@@ -51,10 +53,30 @@ static int isr_routed[INTR_LEVELS];
 #define INTR_ROUTED_YES		1
 #define INTR_ROUTED_NO		2
 
-static volatile unsigned int isr_todo;
-static unsigned int isr_lowest = sizeof(isr_todo)*8;
-
 static struct bmk_thread *isr_thread;
+
+struct isr_handler {
+	struct bmk_block_data header;
+	_Atomic(int) todo;
+};
+
+#define isr_handler_todo (1U << (sizeof(int) * 8 - 1))
+static unsigned int isr_lowest = sizeof(int) * 8 - 1;
+
+static void
+isr_callback(struct bmk_thread *prev, struct bmk_block_data *_data)
+{
+	struct isr_handler *data = (struct isr_handler *) _data;
+
+	if (__atomic_fetch_xor(&data->todo, isr_handler_todo, __ATOMIC_ACQ_REL)
+			!= isr_handler_todo)
+		bmk_sched_wake(prev);
+}
+
+static struct isr_handler isr_data = {
+	.header = { .callback = isr_callback },
+	.todo = isr_handler_todo
+};
 
 static int
 routeintr(int i)
@@ -71,55 +93,50 @@ routeintr(int i)
 static void
 doisr(void *arg)
 {
-	int i, totwork = 0;
-
 	rumpuser__hyp.hyp_schedule();
 	rumpuser__hyp.hyp_lwproc_newlwp(0);
 	rumpuser__hyp.hyp_unschedule();
 
-	splhigh();
 	for (;;) {
 		unsigned int isrcopy;
-		int nlocks = 1;
+		int i, totwork = 0;
 
-		isrcopy = isr_todo;
-		isr_todo = 0;
-		spl0();
+		/* block until the next interrupt. */
+		bmk_sched_blockprepare();
+		bmk_sched_block(&isr_data.header);
 
-		totwork |= isrcopy;
+		isrcopy = __atomic_exchange_n(&isr_data.todo,
+				isr_handler_todo, __ATOMIC_ACQ_REL);
 
-		rumpkern_sched(nlocks, NULL);
-		for (i = isr_lowest; isrcopy; i++) {
-			struct intrhand *ih;
+		do {
+			int nlocks = 1;
 
-			bmk_assert(i < sizeof(isrcopy)*8);
-			if ((isrcopy & (1<<i)) == 0)
-				continue;
-			isrcopy &= ~(1<<i);
+			totwork |= isrcopy;
 
-			if (isr_routed[i] == INTR_ROUTED_YES)
-				i = routeintr(i);
+			rumpkern_sched(nlocks, NULL);
+			for (i = isr_lowest; isrcopy; i++) {
+				struct intrhand *ih;
 
-			SLIST_FOREACH(ih, &isr_ih[i], ih_entries) {
-				ih->ih_fun(ih->ih_arg);
+				bmk_assert(i < sizeof(isrcopy)*8);
+				if ((isrcopy & (1<<i)) == 0)
+					continue;
+				isrcopy &= ~(1<<i);
+
+				if (isr_routed[i] == INTR_ROUTED_YES)
+					i = routeintr(i);
+
+				SLIST_FOREACH(ih, &isr_ih[i], ih_entries) {
+					ih->ih_fun(ih->ih_arg);
+				}
 			}
-		}
-		rumpkern_unsched(&nlocks, NULL);
+			rumpkern_unsched(&nlocks, NULL);
 
-		splhigh();
-		if (isr_todo)
-			continue;
+			isrcopy = __atomic_exchange_n(&isr_data.todo,
+					isr_handler_todo, __ATOMIC_ACQ_REL) ^
+						isr_handler_todo;
+		} while (isrcopy);
 
 		cpu_intr_ack(totwork);
-
-		/* no interrupts left. block until the next one. */
-		bmk_sched_blockprepare();
-
-		spl0();
-
-		bmk_sched_block();
-		totwork = 0;
-		splhigh();
 	}
 }
 
@@ -129,7 +146,7 @@ bmk_isr_rumpkernel(int (*func)(void *), void *arg, int intr, int flags)
 	struct intrhand *ih;
 	int error, icheck, routedintr;
 
-	if (intr > sizeof(isr_todo)*8 || intr > BMK_MAXINTR)
+	if (intr > sizeof(isr_data.todo)*8 || intr > BMK_MAXINTR)
 		bmk_platform_halt("bmk_isr_rumpkernel: intr");
 
 	if ((flags & ~BMK_INTR_ROUTED) != 0)
@@ -168,10 +185,9 @@ bmk_isr_rumpkernel(int (*func)(void *), void *arg, int intr, int flags)
 void
 isr(int which)
 {
-
 	/* schedule the interrupt handler */
-	isr_todo |= which;
-	bmk_sched_wake(isr_thread);
+	if (__atomic_fetch_or(&isr_data.todo, which, __ATOMIC_ACQ_REL) == 0)
+		bmk_sched_wake(isr_thread);
 }
 
 void
@@ -182,8 +198,8 @@ intr_init(void)
 	for (i = 0; i < INTR_LEVELS; i++) {
 		SLIST_INIT(&isr_ih[i]);
 	}
-
-	isr_thread = bmk_sched_create("isrthr", NULL, 0, doisr, NULL, NULL, 0);
+	isr_thread = bmk_sched_create("isrthr", NULL, 0, 0,
+			doisr, NULL, NULL, 0);
 	if (!isr_thread)
 		bmk_platform_halt("intr_init");
 }

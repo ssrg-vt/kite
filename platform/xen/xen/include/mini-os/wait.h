@@ -71,7 +71,7 @@ static inline void minios_wake_up(struct wait_queue_head *head)
 #define minios_wait(w) \
   do { \
     bmk_assert(w.waiting); \
-    bmk_sched_block(); \
+    bmk_sched_block(NULL); \
   } while (/*CONSTCOND*/0)
 
 #define minios_wait_event_deadline(wq, condition, deadline) do {       \
@@ -84,9 +84,9 @@ static inline void minios_wake_up(struct wait_queue_head *head)
         /* protect the list */                                  \
         local_irq_save(flags);                                  \
         minios_add_wait_queue(&wq, &__wait);                           \
-        bmk_sched_blockprepare_timeout(deadline);		\
+        bmk_sched_blockprepare_timeout(deadline, bmk_sched_wake);		\
         local_irq_restore(flags);                               \
-        if (bmk_sched_block() != 0)				\
+        if (bmk_sched_block(NULL) != 0)				\
 	    break;						\
     }                                                           \
     local_irq_save(flags);                                      \

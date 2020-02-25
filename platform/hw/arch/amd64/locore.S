@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2014, 2015 Antti Kantee.  All Rights Reserved.
+ * Copyright (c) 2018 Ruslan Nikolaev.  All Rights Reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -44,8 +45,57 @@ bootstrap:
 .long _ebss
 .long _start
 
-.space 4096
+/* 1K boot stacks. */
+.space 1024*BMK_MAXCPUS
 bootstack:
+
+/* The 16-bit trampoline is moved to 0x7000, so modify all absolute
+   addresses appropriately. */
+#define TRAMPOLINE_ADDR(x)	(x - trampoline + 0x7000)
+
+/* The 16-bit trampoline must fit in the 512-byte region. */
+.code16
+ENTRY(trampoline)
+	cli				/* Disable interrupts */
+	lgdt (TRAMPOLINE_ADDR(gdt32_ptr))
+	movl %cr0, %eax
+	orb $1, %al			/* Protected Enable */
+	movl %eax, %cr0
+	.byte 0x66			/* Prefix */
+	.byte 0xea			/* Long Jump */
+	.long trampoline_32
+	.word 0x8			/* CS */
+
+.align 64
+cpu_gdt32:
+	.quad 0x0000000000000000
+	.quad 0x00cf9b000000ffff	/* CS */
+	.quad 0x00cf93000000ffff	/* DS */
+gdt32_end:
+
+.align 64
+gdt32_ptr:
+	.word gdt32_end-cpu_gdt32-1
+	.quad TRAMPOLINE_ADDR(cpu_gdt32)
+
+/* Do not move since the label is used to calculate the trampoline size. */
+.code32
+ENTRY(trampoline_32)
+	movl $0x10, %eax		/* DS */
+	movl %eax, %ds
+	movl %eax, %es
+	movl %eax, %ss
+	movl %eax, %fs
+	movl %eax, %gs
+	cld
+	movl $1, %eax
+	lock xadd %eax, (trampoline_num_cpus)
+	movl %eax, %esi			/* CPU # */
+	shll $10, %eax			/* Each CPU has 1K boot stack */
+	negl %eax
+	leal bootstack(%eax), %esp	/* Calculate address for current CPU */
+	xorl %edi,%edi			/* Multiboot: NULL pointer */
+	jmp from_trampoline_32
 
 /*
  * Bootloader entry point.
@@ -59,15 +109,13 @@ ENTRY(_start)
 	cld
 	movl $bootstack, %esp
 
-	/* save multiboot info pointer at top of stack, we pop it in 64bit */
-	pushl $0
-	pushl %ebx
-
 	/* save BIOS data area values */
-	movw BIOS_COM1_BASE, %bx
-	movw %bx, bios_com1_base
-	movw BIOS_CRTC_BASE, %bx
-	movw %bx, bios_crtc_base
+	movw BIOS_COM1_BASE, %di
+	movw %di, bios_com1_base
+	movw BIOS_EBDA_BASE, %di
+	movw %di, bios_ebda_base
+	movw BIOS_CRTC_BASE, %di
+	movw %di, bios_crtc_base
 
 	/* clear console */
 	pushl %eax
@@ -77,10 +125,14 @@ ENTRY(_start)
 	rep stosw
 	popl %eax
 
+	movl %ebx, %edi	/* Store multiboot pointer */
+	xorl %esi, %esi	/* CPU: 0 */
+
 	/* only multiboot is supported for now */
 	cmpl $MULTIBOOT_BOOTLOADER_MAGIC, %eax
 	jne nomultiboot
 
+from_trampoline_32:
 	lgdt (gdt64_ptr)
 	pushl $0x0
 	pushw $0x10
@@ -169,8 +221,10 @@ cpu_gdt64:
 	.quad 0x00af9b000000ffff	/* 64bit CS		*/
 	.quad 0x00cf9b000000ffff	/* 32bit CS		*/
 	.quad 0x00cf93000000ffff	/* DS			*/
+.rept BMK_MAXCPUS
 	.quad 0x0000000000000000	/* TSS part 1 (via C)	*/
 	.quad 0x0000000000000000	/* TSS part 2 (via C)	*/
+.endr
 gdt64_end:
 .align 64
 
@@ -179,14 +233,26 @@ gdt64_ptr:
 	.word gdt64_end-cpu_gdt64-1
 	.quad cpu_gdt64
 
+.align 64
+.global boot_num_cpus
+boot_num_cpus:
+	.long 0
+
+.align 64
+trampoline_num_cpus:
+	.long 1				/* CPU #0 has started already */
+
+.align 64
 .code64
 
 ENTRY(_start64)
-	movq $bootstack, %rsp
+	movl %esp, %esp			/* RSP: clean up upper 32 bits */
 	xorq %rbp, %rbp
 
-	/* read multiboot info pointer */
-	movq -8(%rsp), %rdi
+	movl %edi, %edi			/* Multiboot: clean up upper 32 bits */
+	movl %esi, %esi			/* CPU #: clean up upper 32 bits */
+
+	lock incl (boot_num_cpus)	/* Increment number of CPUs */
 
 	pushq $0x0
 	pushq $0x0

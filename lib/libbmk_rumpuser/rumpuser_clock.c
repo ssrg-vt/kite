@@ -54,6 +54,14 @@ rumpuser_clock_gettime(int which, int64_t *sec, long *nsec)
 	return 0;
 }
 
+static void
+clock_callback(struct bmk_thread *prev, struct bmk_block_data *data)
+{
+	bmk_insert_timeq(prev);
+}
+
+static struct bmk_block_data clock_data = { .callback = clock_callback };
+
 int
 rumpuser_clock_sleep(int enum_rumpclock, int64_t sec, long nsec)
 {
@@ -70,8 +78,8 @@ rumpuser_clock_sleep(int enum_rumpclock, int64_t sec, long nsec)
 		break;
 	}
 	deadline += sec * 1000*1000*1000 + nsec;
-	bmk_sched_blockprepare_timeout(deadline);
-	bmk_sched_block();
+	bmk_sched_blockprepare_timeout(deadline, bmk_sched_wake);
+	bmk_sched_block(&clock_data);
 	rumpkern_sched(nlocks, NULL);
 
 	return 0;

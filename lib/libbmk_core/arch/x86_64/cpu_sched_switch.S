@@ -41,7 +41,6 @@ ENTRY(bmk_cpu_sched_bouncer)
 	popq %rdi
 	popq %rbx
 	pushq $0			/* correct stack alignment for SSE */
-	pushq $0
 	xorq %rbp,%rbp
 	call *%rbx
 	call bmk_sched_exit
@@ -54,11 +53,14 @@ ENTRY(bmk_cpu_sched_switch)
 	pushq %r13
 	pushq %r14
 	pushq %r15
+	pushq $1f                       /* save EIP */
 	movq %rsp, (%rdi)               /* save ESP */
-	movq (%rsi), %rsp               /* restore ESP */
-	movq $1f, 8(%rdi)               /* save EIP */
-	pushq 8(%rsi)                   /* restore EIP */
-	ret
+	movq (%rdx), %rsp               /* restore ESP */
+	testq %rsi,%rsi
+	jz 2f                           /* RSI = 0 */
+	call (%rsi)                     /* callback function */
+2:
+	ret                             /* restore EIP */
 1:
 	popq %r15
 	popq %r14

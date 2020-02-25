@@ -29,6 +29,7 @@
 #include <bmk-core/types.h>
 
 extern unsigned long bmk_memsize;
+extern unsigned long bmk_numcpus;
 
 void bmk_platform_halt(const char *) __attribute__((noreturn));
 
@@ -39,5 +40,7 @@ bmk_time_t	bmk_platform_cpu_clock_epochoffset(void);
 
 unsigned long	bmk_platform_splhigh(void);
 void		bmk_platform_splx(unsigned long);
+
+void		bmk_platform_ready(void);
 
 #endif /* _BMK_CORE_PLATFORM_H_ */

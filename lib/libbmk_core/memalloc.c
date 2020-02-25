@@ -52,6 +52,8 @@
 
 #include <bmk-pcpu/pcpu.h>
 
+#include <bmk-core/simple_lock.h>
+
 /*
  * Header goes right before the allocated space and holds
  * information about the allocation.  Notably, we support
@@ -86,9 +88,9 @@ static struct freebucket freebuckets[LOCALBUCKETS];
  */
 static unsigned nmalloc[LOCALBUCKETS];
 
-/* not multicore */
-#define malloc_lock()
-#define malloc_unlock()
+static bmk_simple_lock_t malloc_slock = BMK_SIMPLE_LOCK_INITIALIZER;
+#define malloc_lock()	bmk_simple_lock_enter(&malloc_slock)
+#define malloc_unlock()	bmk_simple_lock_exit(&malloc_slock)
 
 static void *
 morecore(int bucket)

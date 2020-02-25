@@ -58,10 +58,13 @@ bmk_cpu_sched_create(struct bmk_thread *thread, struct bmk_tcb *tcb,
 	/* Save pointer to the thread on the stack, used by current macro */
 	*(unsigned long *)stack_base = (unsigned long)thread;
 
+	stack_push(&stack_top, 0);
+
 	/* these values are used by bmk_cpu_sched_bouncer() */
 	stack_push(&stack_top, (unsigned long)f);
 	stack_push(&stack_top, (unsigned long)arg);
 
+	stack_push(&stack_top, (unsigned long)bmk_cpu_sched_bouncer);
+
 	tcb->btcb_sp = (unsigned long)stack_top;
-	tcb->btcb_ip = (unsigned long)bmk_cpu_sched_bouncer;
 }

@@ -89,7 +89,8 @@ rumprun_boot(char *cmdline)
 	int rv, x;
 
 	rump_boot_setsigmodel(RUMP_SIGMODEL_IGNORE);
-	rump_init();
+	rump_init(bmk_platform_ready);
+	rumprun_lwp_init();
 
 	/* mount /tmp before we let any userspace bits run */
 	rump_sys_mount(MOUNT_TMPFS, "/tmp", 0, &ta, sizeof(ta));
@@ -105,7 +106,6 @@ rumprun_boot(char *cmdline)
 	 * Eventually, we of course want bootstrap process which is
 	 * rumprun() internally.
 	 */
-	rumprun_lwp_init();
 	_netbsd_userlevel_init();
 
 	/* print tmpfs result only after we bootstrapped userspace */

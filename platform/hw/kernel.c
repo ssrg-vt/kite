@@ -28,8 +28,6 @@
 #include <bmk-core/platform.h>
 #include <bmk-core/printf.h>
 
-int spldepth = 1;
-
 /*
  * splhigh()/spl0() internally track depth
  */

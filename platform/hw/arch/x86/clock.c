@@ -34,6 +34,8 @@
 #include <bmk-core/platform.h>
 #include <bmk-core/printf.h>
 
+#include <bmk-pcpu/pcpu.h>
+
 #define NSEC_PER_SEC	1000000000ULL
 /*
  * Minimum delta to sleep using PIT. Programming seems to have an overhead of
@@ -64,10 +66,6 @@ static int have_pvclock;
 /*
  * TSC clock specific.
  */
-
-/* Base time values at the last call to tscclock_monotonic(). */
-static bmk_time_t time_base;
-static uint64_t tsc_base;
 
 /* Multiplier for converting TSC ticks to nsecs. (0.32) fixed point. */
 static uint32_t tsc_mult;
@@ -233,17 +231,18 @@ rtc_gettimeofday(void)
 static bmk_time_t
 tscclock_monotonic(void)
 {
+	struct bmk_cpu_info *cpu = bmk_get_cpu_info();
 	uint64_t tsc_now, tsc_delta;
 
 	/*
 	 * Update time_base (monotonic time) and tsc_base (TSC time).
 	 */
 	tsc_now = rdtsc();
-	tsc_delta = tsc_now - tsc_base;
-	time_base += mul64_32(tsc_delta, tsc_mult);
-	tsc_base = tsc_now;
+	tsc_delta = tsc_now - cpu->tsc_base;
+	cpu->time_base += mul64_32(tsc_delta, tsc_mult);
+	cpu->tsc_base = tsc_now;
 
-	return time_base;
+	return cpu->time_base;
 }
 
 /*
@@ -252,6 +251,7 @@ tscclock_monotonic(void)
 static int
 tscclock_init(void)
 {
+	struct bmk_cpu_info *cpu = bmk_get_cpu_info();
 	uint64_t tsc_freq;
 
 	/* Initialise i8254 timer channel 0 to mode 2 at 100 Hz */
@@ -271,9 +271,9 @@ tscclock_init(void)
 	 * using the i8254 timer.
 	 */
 	spl0();
-	tsc_base = rdtsc();
+	cpu->tsc_base = rdtsc();
 	i8254_delay(100000);
-	tsc_freq = (rdtsc() - tsc_base) * 10;
+	tsc_freq = (rdtsc() - cpu->tsc_base) * 10;
 	splhigh();
 	bmk_printf("x86_initclocks(): TSC frequency estimate is %llu Hz\n",
 		(unsigned long long)tsc_freq);
@@ -289,9 +289,20 @@ tscclock_init(void)
 	 * Monotonic time begins at tsc_base (first read of TSC before
 	 * calibration).
 	 */
-	time_base = mul64_32(tsc_base, tsc_mult);
+	cpu->time_base = mul64_32(cpu->tsc_base, tsc_mult);
 
 	return 0;
+}
+
+extern struct bmk_cpu_info x86_cpu_info[];
+
+static void
+tscclock_init_notmain(void)
+{
+	struct bmk_cpu_info *cpu = bmk_get_cpu_info();
+
+	cpu->tsc_base = rdtsc();
+	cpu->time_base = x86_cpu_info[0].time_base;
 }
 
 /*
@@ -349,6 +360,9 @@ pvclock_init(void)
 {
 	uint32_t eax, ebx, ecx, edx;
 	uint32_t msr_kvm_system_time, msr_kvm_wall_clock;
+
+	/* Disable for now. */
+	return 1;
 
 	if (hypervisor_detect() != HYPERVISOR_KVM)
 		return 1;
@@ -439,6 +453,13 @@ x86_initclocks(void)
 	outb(PIC1_DATA, pic1mask);
 }
 
+void
+x86_initclocks_notmain(void)
+{
+	/* FIXME: add PV clock as well. */
+	tscclock_init_notmain();
+}
+
 /*
  * Return monotonic time since system boot in nanoseconds.
  */
@@ -469,12 +490,13 @@ bmk_platform_cpu_clock_epochoffset(void)
 void
 bmk_platform_cpu_block(bmk_time_t until)
 {
+	struct bmk_cpu_info *cpu = bmk_get_cpu_info();
 	bmk_time_t now, delta_ns;
 	uint64_t delta_ticks;
 	unsigned int ticks;
 	int s;
 
-	bmk_assert(spldepth > 0);
+	bmk_assert(cpu->spldepth > 0);
 
 	/*
 	 * Return if called too late.  Doing do ensures that the time
@@ -529,11 +551,11 @@ bmk_platform_cpu_block(bmk_time_t until)
 	 * able to distinguish if the interrupt was the PIT interrupt
 	 * and no other, but this will do for now.
 	 */
-	s = spldepth;
-	spldepth = 0;
+	s = cpu->spldepth;
+	cpu->spldepth = 0;
 	__asm__ __volatile__(
 		"sti;\n"
 		"hlt;\n"
 		"cli;\n");
-	spldepth = s;
+	cpu->spldepth = s;
 }

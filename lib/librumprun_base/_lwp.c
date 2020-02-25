@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2014, 2015 Antti Kantee.  All Rights Reserved.
+ * Copyright (c) 2018 Ruslan Nikolaev.  All Rights Reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -46,12 +47,19 @@
 
 #include <bmk-core/core.h>
 #include <bmk-core/sched.h>
+#include <bmk-core/simple_lock.h>
 
 #include <rumprun-base/makelwp.h>
 
 #include "rumprun-private.h"
 
+#define RL_MASK_UNPARK	0x1
+#define RL_MASK_PARK	0x2
+
 struct rumprun_lwp {
+	struct bmk_block_data rl_header;
+	unsigned long rl_value;
+	void (*rl_wake) (struct bmk_thread *);
 	struct bmk_thread *rl_thread;
 	int rl_lwpid;
 	char rl_name[MAXCOMLEN+1];
@@ -59,12 +67,13 @@ struct rumprun_lwp {
 	void *rl_arg;
 
 	struct lwpctl rl_lwpctl;
-	int rl_no_parking_hare;	/* a looney tunes reference ... finally! */
 
 	TAILQ_ENTRY(rumprun_lwp) rl_entries;
 };
 static TAILQ_HEAD(, rumprun_lwp) all_lwp = TAILQ_HEAD_INITIALIZER(all_lwp);
 static __thread struct rumprun_lwp *me;
+
+static bmk_simple_lock_t lwp_lock = BMK_SIMPLE_LOCK_INITIALIZER;
 
 #define FIRST_LWPID 1
 static int curlwpid = FIRST_LWPID;
@@ -92,6 +101,21 @@ _lwp_ctl(int ctl, struct lwpctl **data)
 	return 0;
 }
 
+static void
+_lwp_park_callback(struct bmk_thread *prev, struct bmk_block_data *_data)
+{
+	struct rumprun_lwp *rl = (struct rumprun_lwp *) _data;
+
+	if (rl->rl_wake == bmk_sched_wake_timeq)
+		bmk_insert_timeq(prev);
+
+	/* Unset RL_MASK_PARK bit; already unset if RL_MASK_UNPARK is set,
+	   but then the fetched value does not equal to RL_MASK_PARK. */
+	if (__atomic_fetch_xor(&rl->rl_value, RL_MASK_PARK,
+			__ATOMIC_ACQ_REL) != RL_MASK_PARK)
+		rl->rl_wake(prev);
+}
+
 int
 rumprun_makelwp(void (*start)(void *), void *arg, void *private,
 	void *stack_base, size_t stack_size, unsigned long flag, lwpid_t *lid)
@@ -110,10 +134,12 @@ rumprun_makelwp(void (*start)(void *), void *arg, void *private,
 		return errno;
 	}
 	newlwp = rump_pub_lwproc_curlwp();
+	rl->rl_header.callback = _lwp_park_callback;
+	rl->rl_value = RL_MASK_PARK;
 	rl->rl_start = start;
 	rl->rl_arg = arg;
 	rl->rl_lwpid = ++curlwpid;
-	rl->rl_thread = bmk_sched_create_withtls("lwp", rl, 0,
+	rl->rl_thread = bmk_sched_create_withtls("lwp", rl, 0, -1,
 	    rumprun_makelwp_tramp, newlwp, stack_base, stack_size, private);
 	if (rl->rl_thread == NULL) {
 		free(rl);
@@ -124,7 +150,9 @@ rumprun_makelwp(void (*start)(void *), void *arg, void *private,
 	rump_pub_lwproc_switch(curlwp);
 
 	*lid = rl->rl_lwpid;
+	bmk_simple_lock_enter(&lwp_lock);
 	TAILQ_INSERT_TAIL(&all_lwp, rl, rl_entries);
+	bmk_simple_lock_exit(&lwp_lock);
 
 	return 0;
 }
@@ -144,10 +172,14 @@ lwpid2rl(lwpid_t lid)
 
 	if (lid == 0)
 		return &mainthread;
+	bmk_simple_lock_enter(&lwp_lock);
 	TAILQ_FOREACH(rl, &all_lwp, rl_entries) {
-		if (rl->rl_lwpid == lid)
+		if (rl->rl_lwpid == lid) {
+			bmk_simple_lock_exit(&lwp_lock);
 			return rl;
+		}
 	}
+	bmk_simple_lock_exit(&lwp_lock);
 	return NULL;
 }
 
@@ -160,8 +192,26 @@ _lwp_unpark(lwpid_t lid, const void *hint)
 		return -1;
 	}
 
-	bmk_sched_wake(rl->rl_thread);
+	/* Will only wake up if the callback is complete (scheduled out). */
+	if (__atomic_exchange_n(&rl->rl_value, RL_MASK_UNPARK,
+				__ATOMIC_ACQ_REL) == 0)
+		rl->rl_wake(rl->rl_thread);
 	return 0;
+}
+
+static void
+_lwp_wake_timeq(struct bmk_thread *thread)
+{
+	struct bmk_tcb *tcb = (struct bmk_tcb *) thread; /* A better way? */
+	struct rumprun_lwp *rl;
+
+	/* Get the 'me' variable. */
+	rl = *((struct rumprun_lwp **) ((uintptr_t) tcb->btcb_tp + meoff));
+
+	/* Will only wake up if the callback is complete (scheduled out). */
+	if (__atomic_exchange_n(&rl->rl_value, RL_MASK_UNPARK,
+				__ATOMIC_ACQ_REL) == 0)
+		bmk_sched_wake(thread);
 }
 
 ssize_t
@@ -213,6 +263,8 @@ rumprun_lwp_init(void)
 	meoff = (uintptr_t)&me - (uintptr_t)tcb;
 	assignme(tcb, &mainthread);
 	mainthread.rl_thread = bmk_sched_init_mainlwp(&mainthread);
+	mainthread.rl_header.callback = _lwp_park_callback;
+	mainthread.rl_value = RL_MASK_PARK;
 
 	TAILQ_INSERT_TAIL(&all_lwp, me, rl_entries);
 }
@@ -226,9 +278,11 @@ _lwp_park(clockid_t clock_id, int flags, const struct timespec *ts,
 	if (unpark)
 		_lwp_unpark(unpark, unparkhint);
 
-	if (me->rl_no_parking_hare) {
-		me->rl_no_parking_hare = 0;
-		return 0;
+	/* Unparked: clean the RL_MASK_UNPARK bit. */
+	if (__atomic_exchange_n(&me->rl_value, RL_MASK_PARK, __ATOMIC_ACQ_REL)
+			== RL_MASK_UNPARK) {
+		rv = EALREADY;
+		goto done;
 	}
 
 	if (ts) {
@@ -239,17 +293,26 @@ _lwp_park(clockid_t clock_id, int flags, const struct timespec *ts,
 		} else {
 			nsecs += bmk_platform_cpu_clock_monotonic();
 		}
-		bmk_sched_blockprepare_timeout(nsecs);
+		bmk_sched_blockprepare_timeout(nsecs, _lwp_wake_timeq);
+		me->rl_wake = bmk_sched_wake_timeq;
 	} else {
 		bmk_sched_blockprepare();
+		me->rl_wake = bmk_sched_wake;
 	}
-	rv = bmk_sched_block();
+
+	rv = bmk_sched_block(&me->rl_header);
+
+	/* Clean the RL_MASK_UNPARK bit. */
+	__atomic_store_n(&me->rl_value, RL_MASK_PARK, __ATOMIC_SEQ_CST);
+
 	bmk_assert(rv == 0 || rv == ETIMEDOUT);
 
+done:
 	if (rv) {
 		errno = rv;
 		rv = -1;
 	}
+
 	return rv;
 }
 
@@ -259,7 +322,9 @@ _lwp_exit(void)
 
 	me->rl_lwpctl.lc_curcpu = LWPCTL_CPU_EXITED;
 	rump_pub_lwproc_releaselwp();
+	bmk_simple_lock_enter(&lwp_lock);
 	TAILQ_REMOVE(&all_lwp, me, rl_entries);
+	bmk_simple_lock_exit(&lwp_lock);
 
 	/* could just assign it here, but for symmetry! */
 	assignme(bmk_sched_gettcb(), NULL);
@@ -299,11 +364,18 @@ int
 _lwp_wakeup(lwpid_t lid)
 {
 	struct rumprun_lwp *rl;
+	unsigned long value;
 
 	if ((rl = lwpid2rl(lid)) == NULL)
 		return ESRCH;
 
-	bmk_sched_wake(rl->rl_thread);
+	/* Unpark only if the callback is complete (scheduled out). */
+	value = 0;
+	if (!__atomic_compare_exchange_n(&rl->rl_value, &value,
+			RL_MASK_UNPARK, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return ENODEV;
+
+	rl->rl_wake(rl->rl_thread);
 	return 0;
 }
 

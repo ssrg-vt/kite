@@ -46,6 +46,8 @@
 #include <bmk-core/core.h>
 #include <bmk-core/printf.h>
 
+struct bmk_cpu_info bmk_xen_cpu_info = { .cpu = 0 };
+
 uint8_t _minios_xen_features[XENFEAT_NR_SUBMAPS * 32];
 
 void setup_xen_features(void)
@@ -110,6 +112,11 @@ bmk_platform_splx(unsigned long x)
 	local_irq_restore(x);
 }
 
+void
+bmk_platform_ready(void)
+{
+}
+
 /*
  * INITIAL C ENTRY POINT.
  */
@@ -121,7 +128,6 @@ void _minios_start_kernel(start_info_t *si)
 
     arch_init(si);
     trap_init();
-    bmk_sched_init();
 
     /* print out some useful information  */
     minios_printk("  start_info: %p(VA)\n", si);
@@ -148,6 +154,9 @@ void _minios_start_kernel(start_info_t *si)
 
     /* Init memory management. */
     init_mm();
+
+	/* Init the scheduler. */
+    bmk_sched_init();
 
     /* Init time and timers. */
     init_time();

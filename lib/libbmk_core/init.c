@@ -32,11 +32,11 @@ unsigned long bmk_stackpageorder;
 unsigned long bmk_stacksize;
 
 unsigned long bmk_memsize;
+unsigned long bmk_numcpus = 1;
 
 int
 bmk_core_init(unsigned long stackpageorder)
 {
-
 	bmk_stackpageorder = stackpageorder;
 	bmk_stacksize = (1<<stackpageorder) * BMK_PCPU_PAGE_SIZE;
 
