@@ -25,10 +25,14 @@ endif
 ARCHDIR?= ${MACHINE}
 HW_MACHINE_ARCH?= ${MACHINE_GNU_ARCH}
 
+CPPFLAGS+=	-isystem ../xen/xen/include
+CFLAGS+=	-D__XEN_INTERFACE_VERSION__=0x00030205
+
 LDSCRIPT:=	$(abspath arch/${ARCHDIR}/kern.ldscript)
 SRCS+=		intr.c clock_subr.c kernel.c multiboot.c undefs.c
 
 include ../Makefile.inc
+include xen/Makefile.inc
 include arch/${ARCHDIR}/Makefile.inc
 
 # Disable PIE, but need to check if compiler supports it
@@ -40,16 +44,23 @@ OBJS:=	$(patsubst %.c,${RROBJ}/platform/%.o,${SRCS}) \
 
 .PHONY:	clean cleandir all
 
-all:  links archdirs ${MAINOBJ} ${TARGETS}
+all:  links archdirs xendir ${MAINOBJ} ${TARGETS}
 
 ${RROBJ}/include/hw/machine:
 	@mkdir -p ${RROBJ}/include/hw
 	@ln -sf $(shell pwd)/include/arch/${HW_MACHINE_ARCH} $@
 
+${RROBJ}/include/mini-os/machine:
+	@mkdir -p ${RROBJ}/include/mini-os
+	@ln -sf $(shell pwd)/../xen/xen/include/mini-os/x86 $@
+
+${RROBJ}/include/xen:
+	@ln -sf ${XEN_HEADERS} $@
+
 ${RROBJ}/include/bmk-pcpu:
 	@ln -sf ${RROBJ}/include/hw/machine $@
 
-links: ${RROBJ}/include/hw/machine ${RROBJ}/include/bmk-pcpu
+links: ${RROBJ}/include/hw/machine ${RROBJ}/include/mini-os/machine ${RROBJ}/include/xen ${RROBJ}/include/bmk-pcpu
 
 ${RROBJ}/platform/%.o: %.c
 	${CC} ${CPPFLAGS} ${CFLAGS} -c $< -o $@

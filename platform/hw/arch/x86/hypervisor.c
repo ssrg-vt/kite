@@ -28,9 +28,28 @@
 
 #include <arch/x86/hypervisor.h>
 
-int hypervisor_detect(void)
+struct hypervisor_entry {
+	uint32_t ebx;
+	uint32_t ecx;
+	uint32_t edx;
+	uint32_t min_leaves;
+};
+
+static struct hypervisor_entry hypervisors[HYPERVISOR_NUM] = {
+	/* Xen: "XenVMMXenVMM" */
+	[ HYPERVISOR_XEN ] = { 0x566e6558, 0x65584d4d, 0x4d4d566e, 2 },
+	/* VMware: "VMwareVMware" */
+	[ HYPERVISOR_VMWARE ] = { 0x61774d56, 0x4d566572, 0x65726177, 0 },
+	/* Hyper-V: "Microsoft Hv" */
+	[ HYPERVISOR_HYPERV ] = { 0x7263694d, 0x666f736f, 0x76482074, 0 },
+	/* KVM: "KVMKVMKVM\0\0\0" */
+	[ HYPERVISOR_KVM ] = { 0x4b4d564b, 0x564b4d56, 0x0000004d, 0 }
+};
+
+unsigned hypervisor_detect(void)
 {
 	uint32_t eax, ebx, ecx, edx;
+	unsigned i;
 
 	/*
 	 * First check for generic "hypervisor present" bit.
@@ -39,10 +58,10 @@ int hypervisor_detect(void)
 	if (eax >= 0x1) {
 		x86_cpuid(0x1, &eax, &ebx, &ecx, &edx);
 		if (!(ecx & (1 << 31)))
-			return 0;
+			return HYPERVISOR_NONE;
 	}
 	else
-		return 0;
+		return HYPERVISOR_NONE;
 
 	/*
 	 * CPUID leaf at 0x40000000 returns hypervisor vendor signature.
@@ -50,19 +69,34 @@ int hypervisor_detect(void)
 	 */
 	x86_cpuid(0x40000000, &eax, &ebx, &ecx, &edx);
 	if (!(eax >= 0x40000000))
+		return HYPERVISOR_NONE;
+
+	for (i = 0; i < HYPERVISOR_NUM; i++) {
+		if (ebx == hypervisors[i].ebx &&
+				ecx == hypervisors[i].ecx &&
+				edx == hypervisors[i].edx)
+			return i;
+	}
+	return HYPERVISOR_NONE;
+}
+
+uint32_t hypervisor_base(unsigned id)
+{
+	uint32_t base, eax, ebx, ecx, edx;
+
+	if (id >= HYPERVISOR_NUM)
 		return 0;
-	/* Xen: "XenVMMXenVMM" */
-	if (ebx == 0x566e6558 && ecx == 0x65584d4d && edx == 0x4d4d566e)
-		return HYPERVISOR_XEN;
-	/* VMware: "VMwareVMware" */
-	else if (ebx == 0x61774d56 && ecx == 0x4d566572 && edx == 0x65726177)
-		return HYPERVISOR_VMWARE;
-	/* Hyper-V: "Microsoft Hv" */
-	else if (ebx == 0x7263694d && ecx == 0x666f736f && edx == 0x76482074)
-		return HYPERVISOR_HYPERV;
-	/* KVM: "KVMKVMKVM\0\0\0" */
-	else if (ebx == 0x4b4d564b && ecx == 0x564b4d56 && edx == 0x0000004d)
-		return HYPERVISOR_KVM;
+
+	/* Find the base. */
+	for (base = 0x40000000; base < 0x40010000; base += 0x100) {
+		x86_cpuid(base, &eax, &ebx, &ecx, &edx);
+		if ((eax - base) >= hypervisors[id].min_leaves &&
+				ebx == hypervisors[id].ebx &&
+				ecx == hypervisors[id].ecx &&
+				edx == hypervisors[id].edx) {
+			return base;
+		}
+	}
 
 	return 0;
 }

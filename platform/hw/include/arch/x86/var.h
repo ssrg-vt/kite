@@ -23,6 +23,7 @@ void x86_trap_12(void);
 void x86_trap_13(void);
 void x86_trap_14(void);
 void x86_trap_17(void);
+void x86_trap_128(void);
 
 void x86_cpuid(uint32_t, uint32_t *, uint32_t *, uint32_t *, uint32_t *);
 

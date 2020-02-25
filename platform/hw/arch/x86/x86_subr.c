@@ -76,6 +76,7 @@ x86_initidt(void)
 	FILLGATE(13);
 	FILLGATE(14);
 	FILLGATE(17);
+	FILLGATE(128);
 #undef FILLGATE
 	x86_fillgate(2, x86_trap_2, 2);
 	x86_fillgate(8, x86_trap_8, 3);
@@ -90,7 +91,7 @@ x86_cpuid(uint32_t level, uint32_t *eax_out, uint32_t *ebx_out,
 	__asm__(
 		"cpuid"
 		: "=a" (eax_), "=b" (ebx_), "=c" (ecx_), "=d" (edx_)
-		: "0" (level)
+		: "0" (level), "2" (0)
 	);
 	*eax_out = eax_;
 	*ebx_out = ebx_;

@@ -1,10 +1,11 @@
 Rumprun SMP
 ==========
 
-This repository contains a fork of [rumprun](https://github.com/rumpkernel/rumprun). This version of rumprun includes SMP support for the ``hw'' platform
+This repository contains a fork of [rumprun](https://github.com/rumpkernel/rumprun). This version of rumprun includes SMP support for the _hw_ platform
 of rumprun. The SMP support is provided by Ruslan Nikolaev, Virginia Tech.
+This version also includes minimalistic Xen HVM support by Ruslan Nikolaev.
 Below is the README file that was provided with the original version of
-rumprun by Antti Kantee.
+rumprun by Antti Kantee (with changes for Xen HVM).
 
 This repository uses [rump kernels](http://rumpkernel.org) to provide
 the Rumprun [unikernel](https://en.wikipedia.org/wiki/Unikernel).
@@ -46,8 +47,14 @@ video](https://www.youtube.com/watch?v=EyeRplLMx4c) where the hw platform
 is booted on a laptop and plays audio using the PCI hdaudio drivers.
 The supported CPU architectures are x86_32, x86_64 and ARM.
 
-Xen
----
+Xen HVM
+-------
+Xen HVM technically belongs to the _hw_ platform. You need
+to compile the code as _hw_ and bake an ISO image. Then you can boot
+the ISO image in the HVM mode.
+
+Xen PV
+------
 
 The Xen platform is optimized for running on top of the Xen hypervisor
 as a paravirtualized guest, and provides support for virtualization

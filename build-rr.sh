@@ -249,6 +249,10 @@ probeprereqs ()
 			echo '>> (e.g. libxen-dev package on some systems)'
 			die Xen headers not found
 		fi )
+	else
+		loc=/usr/include/xen
+		echo "XEN_HEADERS=${loc}" >> ${RROBJ}/config.mk
+		echo "XEN_HEADERS=\"${loc}\"" >> ${RROBJ}/config.sh
 	fi
 }
 

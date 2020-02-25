@@ -145,8 +145,8 @@ do {									\
 #endif
 
 
-#define LOCK_PREFIX ""
-#define LOCK ""
+#define LOCK_PREFIX "lock "
+#define LOCK "lock "
 #define ADDR (*(volatile long *) addr)
 #define CONSTADDR (*(const volatile long *) addr)
 /*

@@ -35,6 +35,8 @@
 .code32
 
 .align 4
+.global _minios_hypercall_page
+_minios_hypercall_page:
 bootstrap:
 .long MULTIBOOT_HEADER_MAGIC
 .long MYMULTIBOOT_FLAGS
@@ -44,6 +46,14 @@ bootstrap:
 .long _edata
 .long _ebss
 .long _start
+
+/* Reserve space for the hypercall page. */
+.org bootstrap + 0x1000
+
+/* Space for Xen shared info. */
+.global _minios_shared_info
+_minios_shared_info:
+.space 4096
 
 /* 1K boot stacks. */
 .space 1024*BMK_MAXCPUS

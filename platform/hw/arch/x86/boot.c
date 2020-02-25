@@ -34,10 +34,19 @@
 #include <bmk-core/sched.h>
 #include <bmk-core/printf.h>
 #include <bmk-core/string.h>
+#include <bmk-core/pgalloc.h>
 
 #include <bmk-core/platform.h>
 
 #include <bmk-pcpu/pcpu.h>
+
+#include <arch/x86/hypervisor.h>
+#include <mini-os/gnttab.h>
+#include <mini-os/hypervisor.h>
+#include <mini-os/events.h>
+
+#include <xen/memory.h>
+#include <xen/hvm/params.h>
 
 #define MP_MAGIC 0x5F504D5FU
 #define MT_MAGIC 0x504D4350U
@@ -270,6 +279,90 @@ static void x86_mp_init(void)
 	bmk_printf("all %u CPUs are awake\n", total_cpus);
 }
 
+extern char _minios_hypercall_page[];
+extern char _minios_shared_info[];
+
+static uint32_t xen_base = 0;
+
+shared_info_t *HYPERVISOR_shared_info;
+grant_entry_t *gnttab_table;
+
+static void
+x86_xen_init_shared(void)
+{
+	struct xen_add_to_physmap xatp;
+
+	HYPERVISOR_shared_info = (shared_info_t *) _minios_shared_info;
+	xatp.domid = DOMID_SELF;
+	xatp.idx = 0;
+	xatp.space = XENMAPSPACE_shared_info;
+	xatp.gpfn = (unsigned long) HYPERVISOR_shared_info >> PAGE_SHIFT;
+	if (HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp))
+		bmk_platform_halt("cannot get shared info");
+}
+
+static void
+x86_xen_init_callback(uint8_t vector)
+{
+	struct xen_hvm_param xhp;
+
+	xhp.domid = DOMID_SELF;
+	xhp.index = HVM_PARAM_CALLBACK_IRQ;
+	xhp.value = ((uint64_t) HVM_PARAM_CALLBACK_TYPE_VECTOR << 56) | vector;
+	if (HYPERVISOR_hvm_op(HVMOP_set_param, &xhp))
+		bmk_platform_halt("cannot add the HVM callback");
+}
+
+static void
+x86_xen_init_early(void)
+{
+	uint32_t eax, ebx, ecx, edx;
+	uint64_t page = (unsigned long) _minios_hypercall_page;
+
+	if (hypervisor_detect() != HYPERVISOR_XEN)
+		return;
+
+	xen_base = hypervisor_base(HYPERVISOR_XEN);
+	if (!xen_base)
+		return;
+
+	x86_cpuid(xen_base + 2, &eax, &ebx, &ecx, &edx);
+	if (eax != 1) {
+		xen_base = 0;
+		return;
+	}
+
+	__asm__ __volatile("wrmsr" ::
+		"c" (ebx),
+		"a" ((uint32_t)(page)),
+		"d" ((uint32_t)(page >> 32))
+	);
+
+	bmk_printf("initialized XEN hypercalls\n");
+
+	/* Check if Xen VCPU IDs are supported and sane. */
+	x86_cpuid(xen_base + 4, &eax, &ebx, &ecx, &edx);
+	if (!(eax & 0x8) || ebx != 0)
+		bmk_platform_halt("XEN VCPU IDs are not supported\n");
+
+	x86_xen_init_shared();
+}
+
+static void
+x86_xen_init(void)
+{
+	if (!xen_base)
+		return;
+
+	gnttab_table = bmk_pgalloc(3); /* NR_GRANT_FRAMES pages */
+	init_gnttab();
+	init_events();
+
+	x86_xen_init_callback(128);
+
+	bmk_printf("initialized XEN grant tables and event channels\n");
+}
+
 static volatile int main_cpu_ready = 0;
 
 struct bmk_cpu_info x86_cpu_info[BMK_MAXCPUS];
@@ -277,18 +370,25 @@ struct bmk_cpu_info x86_cpu_info[BMK_MAXCPUS];
 void
 x86_boot(struct multiboot_info *mbi, unsigned long cpu)
 {
-	x86_cpu_info[cpu].cpu = cpu;
-	x86_cpu_info[cpu].spldepth = 1;
-	bmk_set_cpu_info(&x86_cpu_info[cpu]);
-
 	/* Other CPUs jumping from the trampoline. */
 	if (cpu) {
+		/* Wait until the main CPU completes. */
+		while (!main_cpu_ready) {}
+
+		/* Get a proper Xen VCPU ID. */
+		if (xen_base) {
+			uint32_t eax, ebx, ecx, edx;
+			x86_cpuid(xen_base + 4, &eax, &ebx, &ecx, &edx);
+			cpu = ebx;
+		}
+
+		x86_cpu_info[cpu].cpu = cpu;
+		x86_cpu_info[cpu].spldepth = 1;
+		bmk_set_cpu_info(&x86_cpu_info[cpu]);
+
 		/* Initialize interrupts. */
 		cpu_init_notmain(cpu);
 		spl0();
-
-		/* Wait until the main CPU completes. */
-		while (!main_cpu_ready) {}
 
 		/* Go to the scheduler. */
 		bmk_sched_startmain(NULL, NULL);
@@ -296,13 +396,19 @@ x86_boot(struct multiboot_info *mbi, unsigned long cpu)
 	}
 
 	/* Main bootstrapping CPU. */
+	x86_cpu_info[0].cpu = 0;
+	x86_cpu_info[0].spldepth = 1;
+	bmk_set_cpu_info(&x86_cpu_info[0]);
+
 	cons_init();
 	bmk_printf("rump kernel bare metal bootstrap\n\n");
 
+	x86_xen_init_early();
 	cpu_init();
 
 	multiboot(mbi);
 
+	x86_xen_init();
 	x86_mp_init();
 
 	bmk_sched_init();

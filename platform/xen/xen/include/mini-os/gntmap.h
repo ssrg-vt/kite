@@ -12,6 +12,15 @@ struct gntmap {
     struct gntmap_entry *entries;
 };
 
+static inline int
+gntmap_map2order(unsigned long count)
+{
+    int o = 8 * sizeof(count) - __builtin_clzl(count);
+    if ((count & (count - 1)) == 0)
+        o--;
+    return o;
+}
+
 int
 gntmap_set_max_grants(struct gntmap *map, int count);
 
