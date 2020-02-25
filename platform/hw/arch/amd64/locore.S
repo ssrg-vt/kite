@@ -35,8 +35,9 @@
 .code32
 
 .align 4
-.global _minios_hypercall_page
+.global _minios_hypercall_page, _kvm_pvclock_wc
 _minios_hypercall_page:
+_kvm_pvclock_wc:
 bootstrap:
 .long MULTIBOOT_HEADER_MAGIC
 .long MYMULTIBOOT_FLAGS
@@ -50,9 +51,10 @@ bootstrap:
 /* Reserve space for the hypercall page. */
 .org bootstrap + 0x1000
 
-/* Space for Xen shared info. */
-.global _minios_shared_info
+/* Space for Xen shared info or KVM PV clock. */
+.global _minios_shared_info, _kvm_pvclock_ti
 _minios_shared_info:
+_kvm_pvclock_ti:
 .space 4096
 
 /* 1K boot stacks. */
