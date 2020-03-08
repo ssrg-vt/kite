@@ -225,36 +225,29 @@ checksubmodules ()
 
 # check that the necessary things are available on the build system
 probeprereqs ()
-{
+{(
+	. "${RROBJ}/config.sh"
+	# probe location of Xen headers
+	found=false
+	for loc in ${XEN_HEADERS:-} /usr/pkg/include/xen /usr/local/include/xen /usr/include/xen; do
+		if printf '#define __GLIBC_USE(x) __GLIBC_USE_ ## x\n#include <stdint.h>\n#include <xen.h>\n'\
+		    | ${CC} -I${loc} -x c - -c -o /dev/null \
+		    >/dev/null 2>&1 ; then
+			found=true
+			break
+		fi
+	done
 
-	if [ "${PLATFORM}" = "xen" ]; then (
-		. "${RROBJ}/config.sh"
-		# probe location of Xen headers
-		found=false
-		for loc in ${XEN_HEADERS:-} /usr/pkg/include/xen /usr/include/xen; do
-			if printf '#include <stdint.h>\n#include <xen.h>\n'\
-			    | ${CC} -I${loc} -x c - -c -o /dev/null \
-			    >/dev/null 2>&1 ; then
-				found=true
-				break
-			fi
-		done
-
-		if ${found}; then
-			echo "XEN_HEADERS=${loc}" >> ${RROBJ}/config.mk
-			echo "XEN_HEADERS=\"${loc}\"" >> ${RROBJ}/config.sh
-		else
-			echo '>> You need to provide Xen headers.'
-			echo '>> The exactly source depends on your system'
-			echo '>> (e.g. libxen-dev package on some systems)'
-			die Xen headers not found
-		fi )
-	else
-		loc=/usr/include/xen
+	if ${found}; then
 		echo "XEN_HEADERS=${loc}" >> ${RROBJ}/config.mk
 		echo "XEN_HEADERS=\"${loc}\"" >> ${RROBJ}/config.sh
+	else
+		echo '>> You need to provide Xen headers.'
+		echo '>> The exactly source depends on your system'
+		echo '>> (e.g. libxen-dev package on some systems)'
+		die Xen headers not found
 	fi
-}
+)}
 
 checkprevbuilds ()
 {

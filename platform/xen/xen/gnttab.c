@@ -34,7 +34,7 @@ static grant_ref_t gnttab_list[NR_GRANT_ENTRIES];
 #ifdef GNT_DEBUG
 static char inuse[NR_GRANT_ENTRIES];
 #endif
-static __DECLARE_SEMAPHORE_GENERIC(gnttab_sem, 0);
+static struct semaphore gnttab_sem;
 
 static void
 put_free_entry(grant_ref_t ref)
@@ -179,6 +179,7 @@ init_gnttab(void)
     unsigned long frames[NR_GRANT_FRAMES];
     int i;
 
+    init_SEMAPHORE(&gnttab_sem, 0);
 #ifdef GNT_DEBUG
     bmk_memset(inuse, 1, sizeof(inuse));
 #endif

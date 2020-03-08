@@ -9,12 +9,15 @@ supported= false
 MACHINE?= i386
 ifeq (${MACHINE},i386)
 HW_MACHINE_ARCH=i386
+HW_MACHINE_ARCH_FAM=x86
 supported:= true
 endif
 ifeq (${MACHINE},amd64)
+HW_MACHINE_ARCH_FAM=x86
 supported:= true
 endif
 ifeq (${MACHINE},evbarm)
+HW_MACHINE_ARCH_FAM=arm
 supported:= true
 ARCHDIR= arm/integrator
 endif
@@ -42,25 +45,19 @@ LDFLAGS += $(LDFLAGS-y)
 OBJS:=	$(patsubst %.c,${RROBJ}/platform/%.o,${SRCS}) \
 	$(patsubst %.S,${RROBJ}/platform/%.o,${ASMS})
 
-.PHONY:	clean cleandir all
+.PHONY:	clean cleandir all links
 
 all:  links archdirs xendir ${MAINOBJ} ${TARGETS}
 
 ${RROBJ}/include/hw/machine:
 	@mkdir -p ${RROBJ}/include/hw
-	@ln -sf $(shell pwd)/include/arch/${HW_MACHINE_ARCH} $@
+	@ln -sfn $(shell pwd)/include/arch/${HW_MACHINE_ARCH} $@
 
-${RROBJ}/include/mini-os/machine:
-	@mkdir -p ${RROBJ}/include/mini-os
-	@ln -sf $(shell pwd)/../xen/xen/include/mini-os/x86 $@
-
-${RROBJ}/include/xen:
-	@ln -sf ${XEN_HEADERS} $@
-
-${RROBJ}/include/bmk-pcpu:
-	@ln -sf ${RROBJ}/include/hw/machine $@
-
-links: ${RROBJ}/include/hw/machine ${RROBJ}/include/mini-os/machine ${RROBJ}/include/xen ${RROBJ}/include/bmk-pcpu
+# Xen PV creates bmk-pcpu and other links outside of RROBJ; do the same for HW
+links: ${RROBJ}/include/hw/machine
+	[ -e ../xen/xen/include/xen ] || ln -sf $(XEN_HEADERS) ../xen/xen/include/xen
+	[ -e ../xen/xen/include/mini-os/machine ] || ln -sf $(HW_MACHINE_ARCH_FAM) ../xen/xen/include/mini-os/machine
+	ln -sfn ../platform/hw/include/arch/${HW_MACHINE_ARCH} ../../include/bmk-pcpu
 
 ${RROBJ}/platform/%.o: %.c
 	${CC} ${CPPFLAGS} ${CFLAGS} -c $< -o $@

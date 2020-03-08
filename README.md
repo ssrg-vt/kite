@@ -37,6 +37,11 @@ is not necessarily final.  The wiki
 [explains](http://wiki.rumpkernel.org/Repo%3A-rumprun#experimental-nature)
 further.
 
+**gcc 8** or higher: newer versions of gcc may produce additional warnings
+which are treated as errors; you can use a workaround by specifying
+CC=/absolute/path/to/rumprun/gcc8fix.sh
+(e.g., CC=~/rumprun-smp/gcc8fix.sh ./build-rr.sh hw).
+
 hw
 --
 
