@@ -6,6 +6,8 @@
 #include <mini-os/queue.h>
 #include <mini-os/spinlock.h>
 
+#define XENBUS_BUG_ON(cond) bmk_assert(!(cond))
+
 typedef unsigned long xenbus_transaction_t;
 #define XBT_NIL ((xenbus_transaction_t)0)
 

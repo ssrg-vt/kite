@@ -28,8 +28,10 @@ endif
 ARCHDIR?= ${MACHINE}
 HW_MACHINE_ARCH?= ${MACHINE_GNU_ARCH}
 
+INSTALLTGTS=    librumpnet_xenif_bak_install
+
 CPPFLAGS+=	-isystem ../xen/xen/include
-CFLAGS+=	-D__XEN_INTERFACE_VERSION__=0x00030205
+CFLAGS+=	-D__XEN_INTERFACE_VERSION__=0x00030205  -Wno-unused-function -Wno-unused-but-set-variable
 
 LDSCRIPT:=	$(abspath arch/${ARCHDIR}/kern.ldscript)
 SRCS+=		intr.c clock_subr.c kernel.c multiboot.c undefs.c
@@ -47,7 +49,7 @@ OBJS:=	$(patsubst %.c,${RROBJ}/platform/%.o,${SRCS}) \
 
 .PHONY:	clean cleandir all links
 
-all:  links archdirs xendir ${MAINOBJ} ${TARGETS}
+all:  links archdirs xendir xenlibs ${MAINOBJ} ${TARGETS}
 
 ${RROBJ}/include/hw/machine:
 	@mkdir -p ${RROBJ}/include/hw
@@ -66,11 +68,16 @@ ${RROBJ}/platform/%.o: %.S
 	${CC} -D_LOCORE ${CPPFLAGS} ${CFLAGS} -c $< -o $@
 
 ${MAINOBJ}: ${OBJS} platformlibs
+$(eval $(call BUILDLIB_target,librumpnet_xenif_bak,.))
+
+xenlibs: ${RROBJLIB}/librumpnet_xenif_bak/librumpnet_xenif_bak.a
+
+${MAINOBJ}: ${OBJS} platformlibs xenlibs
 	${CC} -nostdlib ${CFLAGS} ${LDFLAGS} -Wl,-r ${OBJS} -o $@ \
 	    -L${RROBJLIB}/libbmk_core -L${RROBJLIB}/libbmk_rumpuser \
 	    -Wl,--whole-archive -lbmk_rumpuser -lbmk_core -Wl,--no-whole-archive
-	${OBJCOPY} -w -G bmk_* -G rumpuser_* -G jsmn_* \
-	    -G rumprun_platform_rumpuser_init -G _start $@
+	${OBJCOPY} -w -G bmk_* -G rumpuser_* -G jsmn_* -G minios_* -G xenbus_* \
+	    -G rumprun_platform_rumpuser_init -G _start -G netback_* $@
 
 clean: commonclean
 	rm -f ${OBJS_BMK} include/hw/machine buildtest ${MAINOBJ}

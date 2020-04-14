@@ -65,7 +65,7 @@ int rand(void);
 #define ASSERT(x)                                              \
 do {                                                           \
 	if (!(x)) {                                                \
-		minios_printk("ASSERTION FAILED: %s at %s:%d.\n",             \
+		bmk_printf("ASSERTION FAILED: %s at %s:%d.\n",             \
 			   # x ,                                           \
 			   __FILE__,                                       \
 			   __LINE__);                                      \

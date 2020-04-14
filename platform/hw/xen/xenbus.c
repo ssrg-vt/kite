@@ -76,8 +76,10 @@ spinlock_t xenbus_req_lock = SPIN_LOCK_UNLOCKED;
 static inline void wake_up(struct wait_queue_head *head)
 {
     struct wait_queue *elem, *tmp;
-    STAILQ_FOREACH_SAFE(elem, head, thread_list, tmp)
+    STAILQ_FOREACH_SAFE(elem, head, thread_list, tmp) {
+        minios_remove_wait_queue(head, elem);
         bmk_sched_wake(elem->thread);
+    }
 }
 
 static void queue_wakeup(struct xenbus_event_queue *queue)
@@ -143,7 +145,6 @@ static struct xenbus_event *await_event(struct xenbus_event_queue *queue)
         bmk_sched_block(&block_req);
         spin_lock(&xenbus_req_lock);
     }
-    minios_remove_wait_queue(&queue->waitq, &w);
     spin_unlock(&xenbus_req_lock);
     return event;
 }
@@ -157,7 +158,6 @@ static struct xenbus_event *await_event(struct xenbus_event_queue *queue)
         bmk_sched_block(&block_req);                            \
         spin_lock(&xenbus_req_lock);                            \
     }                                                           \
-    minios_remove_wait_queue(&wq, &__wait);                     \
     spin_unlock(&xenbus_req_lock);                              \
 } while(0)
 
@@ -172,7 +172,6 @@ static struct xenbus_event *await_event(struct xenbus_event_queue *queue)
         bmk_platform_splhigh();                                 \
         spin_lock(&xb_lock);                                    \
     }                                                           \
-    minios_remove_wait_queue(&wq, &__wait);                     \
     spin_unlock(&xb_lock);                                      \
     bmk_platform_splx(0);                                       \
 } while(0)
