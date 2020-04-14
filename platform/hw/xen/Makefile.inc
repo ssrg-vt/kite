@@ -2,6 +2,7 @@ SRCS+=	xen/gnttab.c
 SRCS+=	xen/gntmap.c
 SRCS+=	xen/events.c
 SRCS+=	xen/hypervisor.c
+SRCS+=	xen/xenbus.c
 
 .PHONY: xendir
 xendir:

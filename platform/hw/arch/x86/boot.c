@@ -44,6 +44,7 @@
 #include <mini-os/gnttab.h>
 #include <mini-os/hypervisor.h>
 #include <mini-os/events.h>
+#include <mini-os/xenbus.h>
 
 #include <xen/memory.h>
 #include <xen/hvm/params.h>
@@ -363,6 +364,17 @@ x86_xen_init(void)
 	bmk_printf("initialized XEN grant tables and event channels\n");
 }
 
+static void
+x86_xenbus_init(void)
+{
+	if (!xen_base)
+		return;
+
+	init_xenbus();
+
+	bmk_printf("initialized XENBUS\n");
+}
+
 static volatile int main_cpu_ready = 0;
 
 struct bmk_cpu_info x86_cpu_info[BMK_MAXCPUS];
@@ -412,6 +424,7 @@ x86_boot(struct multiboot_info *mbi, unsigned long cpu)
 	x86_mp_init();
 
 	bmk_sched_init();
+	x86_xenbus_init();
 	intr_init();
 
 	spl0();
