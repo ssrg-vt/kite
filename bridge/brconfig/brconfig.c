@@ -64,6 +64,8 @@ __RCSID("$NetBSD: brconfig.c,v 1.17 2015/06/01 06:15:18 matt Exp $");
 #include <unistd.h>
 #include <ifaddrs.h>
 
+#include "brconfig.h"
+
 struct command {
 	const char *cmd_keyword;
 	int	cmd_argcnt;
@@ -148,7 +150,7 @@ static void	do_bridgeflag(int, const char *, const char *, int, int);
 
 static void	printb(const char *, u_int, const char *);
 
-__dead static void	usage(void);
+void	usage(void);
 
 static int	aflag;
 
@@ -156,7 +158,7 @@ static struct ifreq g_ifr;
 static int	g_ifr_updated;
 
 int
-main(int argc, char *argv[])
+brconfigd(int argc, char *argv[])
 {
 	const struct command *cmd;
 	char *bridge;
@@ -187,11 +189,13 @@ main(int argc, char *argv[])
 		if (argc != 0)
 			usage();
 		printall(sock);
-		exit(0);
+		return 0;
 	}
 
-	if (argc == 0)
+	if (argc == 0) {
 		usage();
+		return 1;
+	}
 
 	bridge = argv[0];
 
@@ -208,7 +212,7 @@ main(int argc, char *argv[])
 
 	if (argc == 0) {
 		status(sock, bridge);
-		exit(0);
+		return 0;
 	}
 
 	while (argc != 0) {
@@ -237,10 +241,10 @@ main(int argc, char *argv[])
 	if (g_ifr_updated && ioctl(sock, SIOCSIFFLAGS, &g_ifr) < 0)
 		err(1, "unable to set interface flags");
 
-	exit (0);
+	return 0;
 }
 
-static void
+void
 usage(void)
 {
 	static const char *usage_strings[] = {
@@ -276,7 +280,6 @@ usage(void)
 		    i == 0 ? "usage:" : "      ",
 		    __progname, usage_strings[i]);
 
-	exit(1);
 }
 
 static int

@@ -620,7 +620,7 @@ do_setifcaps(prop_dictionary_t env)
 }
 
 int
-main(int argc, char **argv)
+ifconfigd(int argc, char **argv)
 {
 	const struct afswtch *afp;
 	int af, s, e;
@@ -812,7 +812,7 @@ main(int argc, char **argv)
 	do_setifcaps(env);
 	do_setethercaps(env);
 
-	exit(EXIT_SUCCESS);
+	return 0;
 }
 
 static void
@@ -917,6 +917,8 @@ printall(const char *ifname, prop_dictionary_t env0)
 	prop_object_release((prop_object_t)oenv);
 	freeifaddrs(ifap);
 }
+
+void if_status() { printall(NULL, NULL); }
 
 static int
 list_cloners(prop_dictionary_t env, prop_dictionary_t oenv)
