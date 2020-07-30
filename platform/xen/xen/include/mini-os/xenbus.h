@@ -182,6 +182,40 @@ struct xenbus_watch {
     struct xenbus_event_queue *events;
     MINIOS_LIST_ENTRY(xenbus_watch) entry;
 };
+
+/*
+ * A xenbus device. Note that the malloced memory will be larger than
+ * sizeof(xenbus_device) to have the storage for xbusd_path, so xbusd_path
+ * has to be the last entry.
+ */
+typedef enum {
+	XENBUS_FRONTEND_DEVICE,
+	XENBUS_BACKEND_DEVICE
+} xenbusdev_type_t;
+
+struct xenbus_device {
+	MINIOS_LIST_ENTRY(xenbus_device) xbusd_entries;
+	char *xbusd_otherend; /* the otherend path */
+	int xbusd_otherend_id; /* the otherend's id */
+	/* callback for otherend change */
+	void (*xbusd_otherend_changed)(void *, XenbusState);
+	xenbusdev_type_t xbusd_type;
+	union {
+/*		struct {
+			device_t f_dev;
+		} f;
+*/		struct {
+			void *b_cookie; /* private to backend driver */
+			int (*b_detach)(void *);
+		} b;
+	} xbusd_u;
+	int xbusd_has_error;
+	/* for xenbus internal use */
+	struct xenbus_watch xbusd_otherend_watch;
+	char *xbusd_path; /* our path */
+};
+
+
 void xenbus_watch_init(struct xenbus_watch *watch); /* makes release a noop */
 void xenbus_watch_prepare(struct xenbus_watch *watch); /* need not be init'd */
 void xenbus_watch_release(struct xenbus_watch *watch); /* idempotent */

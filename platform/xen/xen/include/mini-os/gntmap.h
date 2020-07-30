@@ -19,8 +19,8 @@ struct AddrQueue {
 	unsigned long *array;
 }; 
  
-struct AddrQueue* gntmap_create_addr_queue(void);
-void gntmap_destroy_addr_queue(void);
+struct AddrQueue** gntmap_create_addr_list(void);
+void gntmap_destroy_addr_list(void);
 
 static inline int
 gntmap_map2order(unsigned long count)
@@ -50,6 +50,8 @@ gntmap_map_grant_refs(struct gntmap *map,
 int
 gntmap_munmap_n(struct gntmap *map, unsigned long *addresses, int count);
 
+int
+gntmap_munmap_new(struct gntmap *map, unsigned long start_address, int count);
 
 int
 gntmap_map_grant_refs_n(struct gntmap *map,
@@ -58,6 +60,14 @@ gntmap_map_grant_refs_n(struct gntmap *map,
                       int domids_stride,
                       uint32_t *refs,
                       int writable, void **pages);
+
+unsigned long
+gntmap_map_grant_refs_new(struct gntmap *map,
+                      uint32_t count,
+                      uint32_t *domids,
+                      int domids_stride,
+                      uint32_t *refs,
+                      int writable);
 
 void
 gntmap_init(struct gntmap *map);

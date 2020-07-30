@@ -51,67 +51,92 @@ struct gntmap_entry {
     grant_handle_t handle;
 };
 
-#define addr_queue_capacity 10000
+#define addr_list_capacity 1000
+#define MAX_ORDER 5
 
-struct AddrQueue *queue;
+struct AddrQueue *lists[MAX_ORDER];
 
-//struct AddrQueue *gntmap_create_addr_queue(void);
-//void gntmap_destroy_addr_queue(void);
-
-struct AddrQueue *gntmap_create_addr_queue(void) {
-    queue = (struct AddrQueue *)bmk_memcalloc(1, sizeof(struct AddrQueue),
+static struct AddrQueue *_gntmap_create_addr_list(struct AddrQueue *list) {
+    list = (struct AddrQueue *)bmk_memcalloc(1, sizeof(struct AddrQueue),
                                               BMK_MEMWHO_WIREDBMK);
-    if (queue == NULL) {
-        bmk_printf("Addr queue create failed\n");
+    if (list == NULL) {
+        bmk_printf("Addr list create failed\n");
         return NULL;
     }
-    queue->capacity = addr_queue_capacity;
-    queue->front = queue->size = 0;
-    queue->rear = addr_queue_capacity - 1; // This is important, see the enqueue
-    queue->array = (unsigned long *)bmk_memcalloc(
-        1, queue->capacity * sizeof(unsigned long), BMK_MEMWHO_WIREDBMK);
-    if (queue->array == NULL) {
+    list->capacity = addr_list_capacity;
+    list->front = list->size = 0;
+    list->rear = addr_list_capacity - 1; // This is important, see the enlist
+    list->array = (unsigned long *)bmk_memcalloc(
+        1, list->capacity * sizeof(unsigned long), BMK_MEMWHO_WIREDBMK);
+    if (list->array == NULL) {
         bmk_printf("Addr array create failed\n");
         return NULL;
     }
 
-    return queue;
+    return list;
 }
 
-static inline int is_addr_queue_full(void) {
-    if (queue->size == queue->capacity)
+struct AddrQueue **gntmap_create_addr_list(void) {
+	int i, j;
+
+	for(i =0; i < MAX_ORDER; i++) {
+		lists[i] = _gntmap_create_addr_list(lists[i]);
+
+		if(lists[i] == NULL) {
+			for (j = 0; j < i; j++)
+    				bmk_memfree(lists[j], BMK_MEMWHO_WIREDBMK);
+
+			return NULL;
+		}
+	}
+
+	return lists;
+}
+
+static inline int is_addr_list_full(struct AddrQueue *list) {
+    if (list->size == list->capacity) {
+	bmk_printf("Addr Queue Full\n");
         return 1;
+    }
     return 0;
 }
 
-static inline int is_addr_queue_empty(void) {
-    if (queue->size == 0)
+static inline int is_addr_list_empty(struct AddrQueue *list) {
+    if (list->size == 0) 
         return 1;
+
     return 0;
 }
 
-static inline void add_addr_to_list(unsigned long item) {
-    if (is_addr_queue_full())
+static void add_addr_to_list(struct AddrQueue *list, unsigned long item) {
+	//bmk_printf("Add: %d\n", list->size);
+    if (is_addr_list_full(list))
         return;
 
-    queue->rear = (queue->rear + 1) % queue->capacity;
-    queue->array[queue->rear] = item;
-    queue->size = queue->size + 1;
+    list->rear = (list->rear + 1) % list->capacity;
+    list->array[list->rear] = item;
+    list->size = list->size + 1;
 }
 
-static inline unsigned long get_addr_from_list(void) {
-    if (is_addr_queue_empty())
+static unsigned long get_addr_from_list(struct AddrQueue *list) {
+	//bmk_printf("Get: %d\n", list->size);
+    if (is_addr_list_empty(list))
         return 0;
 
-    unsigned long item = queue->array[queue->front];
-    queue->front = (queue->front + 1) % queue->capacity;
-    queue->size = queue->size - 1;
+    unsigned long item = list->array[list->front];
+    list->front = (list->front + 1) % list->capacity;
+    list->size = list->size - 1;
 
     return item;
 }
 
-void gntmap_destroy_addr_queue(void) {
-    bmk_memfree(queue, BMK_MEMWHO_WIREDBMK);
+void gntmap_destroy_addr_list(void) {
+    int i;
+
+    for(i = 0; i < MAX_ORDER; i++)
+    	bmk_memfree(lists[i], BMK_MEMWHO_WIREDBMK);
+    	
+    bmk_memfree(lists, BMK_MEMWHO_WIREDBMK);
 }
 
 static inline int gntmap_entry_used(struct gntmap_entry *entry) {
@@ -223,6 +248,8 @@ static int _gntmap_map_grant_ref_n(struct gntmap_entry **entry,
     for (i = 0; i < count; i++) {
         __atomic_store_n(&entry[i]->host_addr, host_addr[i], __ATOMIC_SEQ_CST);
         entry[i]->handle = op[i].handle;
+	if(op[i].status != GNTST_okay)
+		return op[i].status;
     }
     return 0;
 }
@@ -293,7 +320,34 @@ static int _gntmap_munmap(struct gntmap *map, unsigned long start_address,
             return rc;
     }
 
-    add_addr_to_list(start_address);
+    add_addr_to_list(lists[gntmap_map2order(count)], start_address);
+
+    return 0;
+}
+
+static int _gntmap_munmap_new(struct gntmap *map, unsigned long start_address,
+                            int count) {
+    int i, rc;
+    struct gntmap_entry *ent[MAP_BATCH];
+
+#ifdef GNTMAP_DEBUG
+    bmk_printf("gntmap_munmap(map=%p, start_address=%ln, count=%d)\n", map,
+               start_address, count);
+#endif
+
+    for (i = 0; i < count; i++) {
+        ent[i] = gntmap_find_entry(map, start_address + i * BMK_PCPU_PAGE_SIZE);
+        if (ent[i] == NULL) {
+            bmk_printf("gntmap: tried to munmap unknown page\n");
+            return -BMK_EINVAL;
+        }
+    }
+
+    rc = _gntmap_unmap_grant_ref_n(ent, count);
+    if (rc != 0)
+        return rc;
+
+    add_addr_to_list(lists[gntmap_map2order(count)], start_address);
 
     return 0;
 }
@@ -304,8 +358,8 @@ static int _gntmap_munmap_n(struct gntmap *map, unsigned long *addresses,
     struct gntmap_entry *ent[MAP_BATCH];
 
 #ifdef GNTMAP_DEBUG
-    bmk_printf("gntmap_munmap(map=%p, start_address=%lx, count=%d)\n", map,
-               start_address, count);
+    bmk_printf("gntmap_munmap(map=%p, start_address=%ln, count=%d)\n", map,
+               addresses, count);
 #endif
 
     for (i = 0; i < count; i++) {
@@ -320,9 +374,7 @@ static int _gntmap_munmap_n(struct gntmap *map, unsigned long *addresses,
     if (rc != 0)
         return rc;
 
-    for (i = 0; i < count; i++) {
-        add_addr_to_list(addresses[i]);
-    }
+    add_addr_to_list(lists[gntmap_map2order(count)], *addresses);
 
     return 0;
 }
@@ -337,6 +389,14 @@ int gntmap_munmap(struct gntmap *map, unsigned long start_address, int count) {
 
 int gntmap_munmap_n(struct gntmap *map, unsigned long *addresses, int count) {
     int rc = _gntmap_munmap_n(map, addresses, count);
+    // FIXME: need to check this
+    //    bmk_pgfree((void *) start_address, gntmap_map2order((unsigned)
+    //    count));
+    return rc;
+}
+
+int gntmap_munmap_new(struct gntmap *map, unsigned long start_address, int count) {
+    int rc = _gntmap_munmap_new(map, start_address, count);
     // FIXME: need to check this
     //    bmk_pgfree((void *) start_address, gntmap_map2order((unsigned)
     //    count));
@@ -358,7 +418,7 @@ void *gntmap_map_grant_refs(struct gntmap *map, uint32_t count,
                domids_stride, refs, refs == NULL ? 0 : refs[0], writable);
 #endif
 
-    addr = get_addr_from_list();
+    addr = get_addr_from_list(lists[gntmap_map2order(count)]);
     if (addr == 0)
         addr = (unsigned long)bmk_pgalloc_align(gntmap_map2order(count),
                                                 BMK_PCPU_PAGE_SIZE);
@@ -395,12 +455,12 @@ int gntmap_map_grant_refs_n(struct gntmap *map, uint32_t count,
 #endif
 
     for (i = 0; i < count; i++) {
-        pages[i] = (void *)get_addr_from_list();
+	pages[i] = (void *)get_addr_from_list(lists[gntmap_map2order(count)]);
         if (pages[i] == NULL)
             pages[i] = bmk_pgalloc_align(0, BMK_PCPU_PAGE_SIZE);
 
         if (pages[i] == NULL) {
-            return -BMK_EINVAL;
+            return -BMK_ENOMEM;
         }
 
         ent[i] = gntmap_find_free_entry(map);
@@ -419,6 +479,64 @@ int gntmap_map_grant_refs_n(struct gntmap *map, uint32_t count,
     return 0;
 }
 
+unsigned long gntmap_map_grant_refs_new(struct gntmap *map, uint32_t count,
+                            uint32_t *domids, int domids_stride, uint32_t *refs,
+                            int writable) {
+    struct gntmap_entry *ent[MAP_BATCH];
+    int i;
+    int order = 0;
+    int value = 1;
+    unsigned long vaddr;
+    void **pages;
+
+
+#ifdef GNTMAP_DEBUG
+    bmk_printf("gntmap_map_grant_refs(map=%p, count=%u, "
+               "domids=%p [%u...], domids_stride=%d, "
+               "refs=%p [%u...], writable=%d)\n",
+               map, count, domids, domids == NULL ? 0 : domids[0],
+               domids_stride, refs, refs == NULL ? 0 : refs[0], writable);
+#endif
+     while(value < count) {
+	     value = value << 1;
+	     order++;
+     }
+
+    vaddr = get_addr_from_list(lists[gntmap_map2order(count)]);
+    if (vaddr == 0) {
+	    vaddr = (unsigned long)bmk_pgalloc_align(order, BMK_PCPU_PAGE_SIZE);
+    }
+
+    if(vaddr == 0)
+	    return -BMK_ENOMEM;
+
+    pages = (void**)bmk_memcalloc(1, sizeof(void*) * count, BMK_MEMWHO_WIREDBMK);
+
+    if(pages == NULL) {
+	    bmk_printf("gntmap_map_grant_refs_new: Cannot allocate pages\n");
+            return -BMK_ENOMEM;
+    } 
+
+    for (i = 0; i < count; i++) {
+        pages[i] = (void*)(vaddr + i * BMK_PCPU_PAGE_SIZE);
+
+        ent[i] = gntmap_find_free_entry(map);
+        if (ent[i] == NULL) {
+            return -BMK_ENOMEM;
+        }
+    }
+
+    if (_gntmap_map_grant_ref_n(ent, (unsigned long *)pages, *domids, refs,
+                                writable, count) != 0) {
+        //(void) _gntmap_munmap(map, addr, i);
+        // bmk_pgfree((void *) addr, gntmap_map2order(count));
+        return -BMK_EINVAL;
+    }
+
+    bmk_memfree(pages, BMK_MEMWHO_WIREDBMK);
+
+    return vaddr;
+}
 void gntmap_init(struct gntmap *map) {
 #ifdef GNTMAP_DEBUG
     bmk_printf("gntmap_init(map=%p)\n", map);

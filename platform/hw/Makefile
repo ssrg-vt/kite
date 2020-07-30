@@ -28,7 +28,7 @@ endif
 ARCHDIR?= ${MACHINE}
 HW_MACHINE_ARCH?= ${MACHINE_GNU_ARCH}
 
-INSTALLTGTS=    librumpxen_netback_install librumpnet_xenif_install
+INSTALLTGTS=    librumpxen_netback_install librumpnet_xenif_install librumpxen_blkback_install
 
 CPPFLAGS+=	-isystem ../xen/xen/include
 CFLAGS+=	-D__XEN_INTERFACE_VERSION__=0x00030205  -Wno-unused-function -Wno-unused-but-set-variable
@@ -70,8 +70,11 @@ ${RROBJ}/platform/%.o: %.S
 ${MAINOBJ}: ${OBJS} platformlibs
 $(eval $(call BUILDLIB_target,librumpxen_netback,.))
 $(eval $(call BUILDLIB_target,librumpnet_xenif,.))
+$(eval $(call BUILDLIB_target,librumpxen_blkback,.))
 
-xenlibs: ${RROBJLIB}/librumpxen_netback/librumpxen_netback.a ${RROBJLIB}/librumpnet_xenif/librumpnet_xenif.a
+xenlibs: ${RROBJLIB}/librumpxen_netback/librumpxen_netback.a \
+		${RROBJLIB}/librumpnet_xenif/librumpnet_xenif.a \
+		${RROBJLIB}/librumpxen_blkback/librumpxen_blkback.a
 
 ${MAINOBJ}: ${OBJS} platformlibs xenlibs
 	${CC} -nostdlib ${CFLAGS} ${LDFLAGS} -Wl,-r ${OBJS} -o $@ \
