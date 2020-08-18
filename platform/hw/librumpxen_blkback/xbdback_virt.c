@@ -154,30 +154,34 @@ xbdback_getiodone(struct buf *buf)
 }
 
 void
-rump_xbdback_bdev_strategy(struct buf *xio_buf)
+rump_xbdback_bdev_strategy(struct buf *xio_buf, uint16_t count)
 {
-	if ((xio_buf->b_flags & B_READ) == 0) {
-		mutex_enter(xio_buf->b_vp->v_interlock);
-		xio_buf->b_vp->v_numoutput++;
-		mutex_exit(xio_buf->b_vp->v_interlock);
-	}
+	for(int i = 0; i < count; i++) {
+		if ((xio_buf[i].b_flags & B_READ) == 0) {
+			mutex_enter(xio_buf[i].b_vp->v_interlock);
+			xio_buf[i].b_vp->v_numoutput++;
+			mutex_exit(xio_buf[i].b_vp->v_interlock);
+		}
 
-	xio_buf->b_iodone = xbdback_getiodone;
-	bdev_strategy(xio_buf);
+		xio_buf[i].b_iodone = xbdback_getiodone;
+		bdev_strategy(&xio_buf[i]);
+	}
 }
 
 void
-rump_xbdback_buf_init(struct buf *xio_buf, struct vnode *vp)
+rump_xbdback_buf_init(struct buf *xio_buf, struct vnode *vp, uint16_t count)
 {
-	buf_init(xio_buf);
-	xio_buf->b_objlock = vp->v_interlock;
-
+	for(int i = 0; i < count; i++) {
+		buf_init(&xio_buf[i]);
+		xio_buf[i].b_objlock = vp->v_interlock;
+	}
 }
 	
 void
-rump_xbdback_buf_destroy(struct buf *xio_buf)
+rump_xbdback_buf_destroy(struct buf *xio_buf, uint16_t count)
 {
-	buf_destroy(xio_buf);
+	for(int i = 0; i < count; i++)
+		buf_destroy(&xio_buf[i]);
 }
 
 physical_device storage_devices[10];
@@ -190,7 +194,7 @@ rump_xbdback_get_number(const char *dev_path)
 	for(i=0; i < 10; i++) {
 		if (strcmp(dev_path, storage_devices[i].path) == 0) {
 		       	if(storage_devices[i].status == 0) {
-				aprint_normal("Device is already occupied\n");
+				aprint_normal("rump_xbdback_get_number: device is already occupied\n");
 				return 0;
 			}
 

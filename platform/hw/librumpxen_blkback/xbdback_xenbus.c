@@ -281,7 +281,7 @@ struct xbdback_io {
 	uint8_t xio_operation;
 	union {
 		struct {
-			struct buf xio_buf; /* our I/O */
+			struct buf xio_buf[BLKIF_MAX_PAGES_PER_REQUEST]; /* our I/O */
 			/* xbd requests involved */
 			SLIST_HEAD(, xbdback_fragment) xio_rq;
 			/* the virtual address to map the request at */
@@ -291,6 +291,7 @@ struct xbdback_io {
 			/* grants release */
 			grant_handle_t xio_gh[BLKIF_MAX_PAGES_PER_REQUEST];
 			uint16_t xio_nrma; /* number of guest pages */
+			uint16_t xio_done; /* number of guest pages */
 			uint16_t xio_mapped; /* == 1: grants are mapped */
 		} xio_rw;
 		uint64_t xio_flush_id;
@@ -302,6 +303,7 @@ struct xbdback_io {
 #define xio_gref	u.xio_rw.xio_gref
 #define xio_gh		u.xio_rw.xio_gh
 #define xio_nrma	u.xio_rw.xio_nrma
+#define xio_done	u.xio_rw.xio_done
 #define xio_mapped	u.xio_rw.xio_mapped
 
 #define xio_flush_id	u.xio_flush_id
@@ -1132,12 +1134,12 @@ xbdback_thread(void *arg)
 {
 	struct xbdback_instance *xbdi = arg;
 
-#if 0
+//#if 0
 	/* give us a rump kernel context */
     	rumpuser__hyp.hyp_schedule();
     	rumpuser__hyp.hyp_lwproc_newlwp(0);
     	rumpuser__hyp.hyp_unschedule();
-#endif
+//#endif
 
 	for (;;) {
 		XENPRINTF(("xbdback_thread\n"));
@@ -1631,7 +1633,7 @@ xbdback_co_io_gotio(struct xbdback_instance *xbdi, void *obj)
 {
 	struct xbdback_io *xbd_io;
 	vaddr_t start_offset; /* start offset in vm area */
-	int buf_flags;
+	int buf_flags, i;
 
 	XENPRINTF(("xbdback_co_io_gotio\n"));
 
@@ -1642,13 +1644,15 @@ xbdback_co_io_gotio(struct xbdback_instance *xbdi, void *obj)
 	if(xbdi->xbdi_vp == NULL)
 		bmk_platform_halt("xbdi->xbdi_vp == NULL\n");
 
-    	//rumpuser__hyp.hyp_schedule();
-	rump_xbdback_buf_init(&xbd_io->xio_buf, xbdi->xbdi_vp);
-    	//rumpuser__hyp.hyp_unschedule();
+    	rumpuser__hyp.hyp_schedule();
+	rump_xbdback_buf_init(xbd_io->xio_buf, xbdi->xbdi_vp,
+				BLKIF_MAX_PAGES_PER_REQUEST);
+    	rumpuser__hyp.hyp_unschedule();
 
 	xbd_io->xio_xbdi = xbdi;
 	SLIST_INIT(&xbd_io->xio_rq);
 	xbd_io->xio_nrma = 0;
+	xbd_io->xio_done = 0;
 	xbd_io->xio_mapped = 0;
 	xbd_io->xio_operation = xbdi->xbdi_xen_req.operation;
 
@@ -1660,18 +1664,20 @@ xbdback_co_io_gotio(struct xbdback_instance *xbdi, void *obj)
 		buf_flags = B_READ;
 	}
 
-	xbd_io->xio_buf.b_flags = buf_flags;
-	xbd_io->xio_buf.b_cflags = 0;
-	xbd_io->xio_buf.b_oflags = 0;
-	xbd_io->xio_buf.b_iodone = xbdback_iodone;
-	xbd_io->xio_buf.b_proc = NULL;
-	xbd_io->xio_buf.b_vp = xbdi->xbdi_vp;
-	//xbd_io->xio_buf.b_objlock = xbdi->xbdi_vp->v_interlock;
-	xbd_io->xio_buf.b_dev = xbdi->xbdi_dev;
-	xbd_io->xio_buf.b_blkno = xbdi->xbdi_next_sector;
-	xbd_io->xio_buf.b_bcount = 0;
-	xbd_io->xio_buf.b_data = (void *)start_offset;
-	xbd_io->xio_buf.b_private = xbd_io;
+	for( i = 0; i < BLKIF_MAX_PAGES_PER_REQUEST; i++) {
+		xbd_io->xio_buf[i].b_flags = buf_flags;
+		xbd_io->xio_buf[i].b_cflags = 0;
+		xbd_io->xio_buf[i].b_oflags = 0;
+		xbd_io->xio_buf[i].b_iodone = xbdback_iodone;
+		xbd_io->xio_buf[i].b_proc = NULL;
+		xbd_io->xio_buf[i].b_vp = xbdi->xbdi_vp;
+		//xbd_io->xio_buf.b_objlock = xbdi->xbdi_vp->v_interlock;
+		xbd_io->xio_buf[i].b_dev = xbdi->xbdi_dev;
+		xbd_io->xio_buf[i].b_blkno = xbdi->xbdi_next_sector;
+		xbd_io->xio_buf[i].b_bcount = 0;
+		xbd_io->xio_buf[i].b_data = (void *)start_offset;
+		xbd_io->xio_buf[i].b_private = xbd_io;
+	}
 
 	xbdi->xbdi_cont = xbdback_co_io_gotio2;
 	return xbdi;
@@ -1745,9 +1751,9 @@ xbdback_co_io_gotfrag2(struct xbdback_instance *xbdi, void *obj)
 		xbd_io->xio_gref[xbd_io->xio_nrma++] = xbdi->xbdi_thisgrt;
 	}
 
-	xbd_io->xio_buf.b_bcount += (uint64_t)(seg_size * VBD_BSIZE);
+	xbd_io->xio_buf[xbd_io->xio_nrma - 1].b_bcount += (uint64_t)(seg_size * VBD_BSIZE);
 	XENPRINTF(("xbdback_io domain %d: start sect %d size %d\n",
-	    xbdi->xbdi_domid, (int)xbdi->xbdi_next_sector, seg_size));
+				-           xbdi->xbdi_domid, (int)xbdi->xbdi_next_sector, seg_size));
 	
 	/* Finally, the end of the segment loop! */
 	xbdi->xbdi_next_sector += seg_size;
@@ -1765,8 +1771,8 @@ xbdback_co_map_io(struct xbdback_instance *xbdi, void *obj)
 	(void)obj;
 
 	XENPRINTF(("xbdback_co_map_io domain %d: flush sect %ld size %d ptr 0x%lx\n",
-	    xbdi->xbdi_domid, (long)xbdi->xbdi_io->xio_buf.b_blkno,
-	    (int)xbdi->xbdi_io->xio_buf.b_bcount, (long)xbdi->xbdi_io));
+	    xbdi->xbdi_domid, (long)xbdi->xbdi_io->xio_buf[0].b_blkno,
+	    (int)xbdi->xbdi_io->xio_buf[0].b_bcount, (long)xbdi->xbdi_io));
 	xbdi->xbdi_cont = xbdback_co_do_io;
 	return xbdback_map_shm(xbdi->xbdi_io);
 }
@@ -1776,8 +1782,8 @@ xbdback_io_error(struct xbdback_io *xbd_io, int error)
 {
 	XENPRINTF(("xbdback_io_error\n"));
 
-	xbd_io->xio_buf.b_error = error;
-	xbdback_iodone(&xbd_io->xio_buf);
+	xbd_io->xio_buf[0].b_error = error;
+	xbdback_iodone(&xbd_io->xio_buf[0]);
 }
 
 /*
@@ -1788,6 +1794,7 @@ static void *
 xbdback_co_do_io(struct xbdback_instance *xbdi, void *obj)
 {
 	struct xbdback_io *xbd_io = xbdi->xbdi_io;
+	int i, seg_size, next_sector = 0;
 
 	XENPRINTF(("xbdback_co_do_io\n"));
 
@@ -1824,8 +1831,18 @@ xbdback_co_do_io(struct xbdback_instance *xbdi, void *obj)
 	case BLKIF_OP_READ:
 	case BLKIF_OP_WRITE:
 		XENPRINTF(("BLKIF_OP_R/W\n"));
-		xbd_io->xio_buf.b_data = (void *)
-		    		((vaddr_t)xbd_io->xio_buf.b_data + xbd_io->xio_vaddr);
+
+		next_sector = 0;
+		for(i = 0; i < xbd_io->xio_nrma; i++) {
+			xbd_io->xio_buf[i].b_data = (void *)
+		    		((vaddr_t)xbd_io->xio_buf[i].b_data 
+				 + xbd_io->xio_vaddr
+				 + i * BMK_PCPU_PAGE_SIZE);
+
+			xbd_io->xio_buf[i].b_blkno += next_sector;
+			seg_size =  xbd_io->xio_buf[i].b_bcount / VBD_BSIZE;
+			next_sector += seg_size;
+		}
 #ifdef DIAGNOSTIC
 		{
 		vaddr_t bdata = (vaddr_t)xbd_io->xio_buf.b_data;
@@ -1847,7 +1864,7 @@ xbdback_co_do_io(struct xbdback_instance *xbdi, void *obj)
 		}
 #endif
     		rumpuser__hyp.hyp_schedule();
-		rump_xbdback_bdev_strategy(&xbd_io->xio_buf);
+		rump_xbdback_bdev_strategy(xbd_io->xio_buf, xbd_io->xio_nrma);
     		rumpuser__hyp.hyp_unschedule();
 	
 		/* will call xbdback_iodone() asynchronously when done */
@@ -1884,13 +1901,16 @@ xbdback_iodone(struct buf *bp)
 	struct xbdback_io *xbd_io;
 	struct xbdback_instance *xbdi;
 	int errp;
-//	int i, k;
 
 	xbd_io = bp->b_private;
 	xbdi = xbd_io->xio_xbdi;
 
 	XENPRINTF(("xbdback_iodone %d: iodone ptr 0x%lx\n",
 		   xbdi->xbdi_domid, (long)xbd_io));
+
+	xbd_io->xio_done++;
+	if(xbd_io->xio_done != xbd_io->xio_nrma)
+		return;
 
 	if (xbd_io->xio_mapped == 1)
 		xbdback_unmap_shm(xbd_io);
@@ -1903,23 +1923,7 @@ xbdback_iodone(struct buf *bp)
 		errp = 1;
 	} else
 		errp = 0;
-/*
-	char *p;
-	if(xbd_io->xio_operation == BLKIF_OP_READ) {
-		//for (i = 0, j =0; i < xbd_io->xio_nrma * BMK_PCPU_PAGE_SIZE; 
-		//		i = i + BMK_PCPU_PAGE_SIZE, j++) {
-		for (i = 0; i < xbd_io->xio_nrma; i++) { 
-			//bmk_memcpy(xbd_io->xio_vap[j], xbd_io->xio_buf.b_data + i, 
-			//		BMK_PCPU_PAGE_SIZE);
-			
-			//xbd_io->xio_vap[i] = bmk_memcalloc(1, BMK_PCPU_PAGE_SIZE, BMK_MEMWHO_WIREDBMK);
-			bmk_memset(xbd_io->xio_vap[i], 'a' + i, BMK_PCPU_PAGE_SIZE);
-			p = (char*)(xbd_io->xio_vap[i]);
-			for(k = 0; k < BMK_PCPU_PAGE_SIZE; k++)
-				bmk_printf("%d", p[k]);
-		}
-	}
-*/
+
 	/* for each constituent xbd request */
 	while(!SLIST_EMPTY(&xbd_io->xio_rq)) {
 		struct xbdback_fragment *xbd_fr;
@@ -1958,7 +1962,7 @@ xbdback_iodone(struct buf *bp)
 	xbdi_put(xbdi);
 	__atomic_fetch_sub(&(xbdi)->xbdi_pendingreqs, 1,  __ATOMIC_ACQ_REL);
     	rumpuser__hyp.hyp_schedule();
-	rump_xbdback_buf_destroy(&xbd_io->xio_buf);
+	rump_xbdback_buf_destroy(xbd_io->xio_buf, xbd_io->xio_nrma);
     	rumpuser__hyp.hyp_unschedule();
 	xbdback_pool_put(xbdback_io_pool, xbd_io);
 	xbdback_wakeup_thread(xbdi);

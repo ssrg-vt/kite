@@ -29,11 +29,11 @@ extern physical_device storage_devices[10];
 void xbdback_entry(void);
 void xbdback_getiodone(struct buf *buf);
 int rump_xbdback_vop_ioctl(struct vnode *xbdi_vp);
-void rump_xbdback_bdev_strategy(struct buf *xio_buf);
+void rump_xbdback_bdev_strategy(struct buf *xio_buf, uint16_t count);
 void rump_xbdback_virt_destroy(struct vnode *xbdi_vp, uint16_t xbdi_domid);
 struct vnode* rump_xbdback_virt_changed(unsigned short xbdi_dev, struct vnode *xbdi_vp, uint64_t *xbdi_size, uint16_t xbdi_domid);
-void rump_xbdback_buf_init(struct buf *b, struct vnode * vp);
-void rump_xbdback_buf_destroy(struct buf *xio_buf);
+void rump_xbdback_buf_init(struct buf *b, struct vnode * vp, uint16_t count);
+void rump_xbdback_buf_destroy(struct buf *xio_buf, uint16_t count);
 unsigned long rump_xbdback_get_number(const char *dev_path);
 
 #endif
