@@ -109,7 +109,6 @@ static inline int is_addr_list_empty(struct AddrQueue *list) {
 }
 
 static void add_addr_to_list(struct AddrQueue *list, unsigned long item) {
-	//bmk_printf("Add: %d\n", list->size);
     if (is_addr_list_full(list))
         return;
 
@@ -119,7 +118,6 @@ static void add_addr_to_list(struct AddrQueue *list, unsigned long item) {
 }
 
 static unsigned long get_addr_from_list(struct AddrQueue *list) {
-	//bmk_printf("Get: %d\n", list->size);
     if (is_addr_list_empty(list))
         return 0;
 
@@ -209,8 +207,8 @@ static int _gntmap_map_grant_ref(struct gntmap_entry *entry,
     rc = HYPERVISOR_grant_table_op(GNTTABOP_map_grant_ref, &op, 1);
     if (rc != 0 || op.status != GNTST_okay) {
         bmk_printf("GNTTABOP_map_grant_ref failed: "
-                   "returned %d, status %d\n",
-                   rc, op.status);
+                   "returned %d, status %d for gref %lu\n",
+                   rc, op.status, op.host_addr);
         __atomic_store_n(&entry->host_addr, 0, __ATOMIC_SEQ_CST);
         return rc != 0 ? rc : op.status;
     }
@@ -427,12 +425,15 @@ void *gntmap_map_grant_refs(struct gntmap *map, uint32_t count,
 
     for (i = 0; i < count; i++) {
         ent = gntmap_find_free_entry(map);
+	if(ent == NULL)
+		bmk_printf("ent == NULL\n");
         if (ent == NULL || _gntmap_map_grant_ref(ent, addr + PAGE_SIZE * i,
                                                  domids[i * domids_stride],
                                                  refs[i], writable) != 0) {
 
-            (void)_gntmap_munmap(map, addr, i);
-            bmk_pgfree((void *)addr, gntmap_map2order(count));
+   	    bmk_printf("Grant mapping failed\n");
+            //(void)_gntmap_munmap(map, addr, i);
+            //bmk_pgfree((void *)addr, gntmap_map2order(count));
             return NULL;
         }
     }

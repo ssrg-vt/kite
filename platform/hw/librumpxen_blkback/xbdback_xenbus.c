@@ -213,6 +213,7 @@ struct xbdback_instance {
 	unsigned short xbdi_ro; /* is device read-only ? */
 	/* parameters for the communication */
 	evtchn_port_t xbdi_evtchn;
+	uint8_t persistent;
 	/* private parameters for communication */
 	blkif_back_ring_proto_t xbdi_ring;
         struct gntmap xbdi_ring_map;
@@ -285,7 +286,7 @@ struct xbdback_io {
 			/* xbd requests involved */
 			SLIST_HEAD(, xbdback_fragment) xio_rq;
 			/* the virtual address to map the request at */
-			vaddr_t xio_vaddr;
+			vaddr_t xio_vaddr[BLKIF_MAX_PAGES_PER_REQUEST];
 			/* grants to map */
 			grant_ref_t xio_gref[BLKIF_MAX_PAGES_PER_REQUEST];
 			/* grants release */
@@ -331,8 +332,14 @@ struct xbdback_pool {
 } *xbdback_request_pool, *xbdback_io_pool, *xbdback_fragment_pool;
 
 SIMPLEQ_HEAD(xbdback_iqueue, xbdback_instance);
-//static struct xbdback_ipool xbdback_shmq;
-//static int xbdback_shmcb; /* have we already registered a callback? */
+
+struct gref_2_page {
+	vaddr_t page;
+	uint8_t op;
+};
+
+#define GREF_TABLE_SIZE 10000 // it should be 2^32 to hold page addr for any gref
+struct gref_2_page gref_table[GREF_TABLE_SIZE];
 
 static struct bmk_thread *xbdback_watch_thread;
 static struct xenbus_event_queue watch_queue;
@@ -392,6 +399,10 @@ static void* xbdback_pool_get(struct xbdback_pool *pool);
 
 static void xbdback_trampoline(struct xbdback_instance *, void *);
 static void xbdback_thread(void *);
+	
+static void put_page_to_gref_table(grant_ref_t ref, vaddr_t page, uint8_t op);
+static vaddr_t get_page_from_gref_table(grant_ref_t ref, uint8_t op);
+
 static void xbdback_wakeup_thread(struct xbdback_instance *);
 static void threadblk_callback(struct bmk_thread *, struct bmk_block_data *);
 
@@ -400,13 +411,12 @@ static void threadblk_callback(struct bmk_thread *prev,
 {
 	struct threadblk *data = (struct threadblk *)_data;
 
-	XENPRINTF(("threadblk_callback\n"));
+	XENPRINTF(("%s\n", __func__));
 
          /* THREADBLK_STATUS_AWAKE -> THREADBLK_STATUS_SLEEP */
 	 /* THREADBLK_STATUS_NOTIFY -> THREADBLK_STATUS_AWAKE */
 	 if (__atomic_fetch_sub(&data->status, 1, __ATOMIC_ACQ_REL) !=
 	     THREADBLK_STATUS_AWAKE) {
-	     XENPRINTF(("previous = %p\n", prev));
 	     /* the current state is THREADBLK_STATUS_AWAKE */
 	     bmk_sched_wake(prev);
 	 }
@@ -443,7 +453,7 @@ xbdbackattach(int n)
 	struct xbdback_io *io;
 	struct xbdback_fragment *fragment;
 
-	XENPRINTF(("xbdbackattach\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	/*
 	 * initialize the backend driver, register the control message handler
@@ -514,7 +524,13 @@ static void xbdw_thread_func(void *ign)
 	char **ret;
 	struct xbdback_watch *xbdw;
 
-	XENPRINTF(("xbdw_thread_func\n"));
+	XENPRINTF(("%s\n", __func__));
+		
+	/* give us a rump kernel context */
+    	rumpuser__hyp.hyp_schedule();
+    	rumpuser__hyp.hyp_lwproc_newlwp(0);
+    	rumpuser__hyp.hyp_unschedule();
+
 	for(;;) {
 		ret = xenbus_wait_for_watch_return(&watch_queue);
 		if(ret == NULL)
@@ -588,7 +604,7 @@ probe_xbdback_device(const char *vbdpath) {
     char *msg;
     char *devpath, path[40];
 
-    XENPRINTF(("Probe xbdback device\n"));
+    XENPRINTF(("%s\n", __func__));
 
     msg = xenbus_ls(XBT_NIL, vbdpath, &dir);
     if (msg) {
@@ -642,7 +658,7 @@ xbdback_xenbus_create(char *xbusd_path)
 	xbusd = (struct xenbus_device*)bmk_memcalloc(1, sizeof(xbusd),
 			BMK_MEMWHO_WIREDBMK);
 	xbusd->xbusd_path = xbusd_path;
-	XENPRINTF(("xbdback_xenbus_create = %s\n", xbusd->xbusd_path));
+	XENPRINTF(("%s = %s\n", __func__, xbusd->xbusd_path));
 
 	bmk_snprintf(path, sizeof(path), "%s/frontend-id", xbusd->xbusd_path);
 	domid = xenbus_read_integer(path);
@@ -776,7 +792,7 @@ xbdback_xenbus_destroy(void *arg)
     	rumpuser__hyp.hyp_lwproc_newlwp(0);
     	rumpuser__hyp.hyp_unschedule();
 
-	XENPRINTF(("xbdback_xenbus_destroy state %d\n", xbdi->xbdi_status));
+	XENPRINTF(("%s: status %d\n", __func__, xbdi->xbdi_status));
 
 	xbdback_disconnect(xbdi);
 
@@ -819,7 +835,7 @@ xbdback_connect(struct xbdback_instance *xbdi)
 	char path[64];
 	int rc;
 
-	XENPRINTF(("xbdback %s: connect\n", xbusd->xbusd_path));
+	XENPRINTF(("%s: %s\n", __func__, xbusd->xbusd_path));
 
 	/* read comunication informations */
 	bmk_snprintf(path, sizeof(path), "%s/ring-ref", xbusd->xbusd_otherend);
@@ -829,6 +845,10 @@ xbdback_connect(struct xbdback_instance *xbdi)
 	bmk_snprintf(path, sizeof(path), "%s/event-channel", xbusd->xbusd_otherend);
 	revtchn = xenbus_read_integer(path);
 	bmk_printf("xbdback %s: connect revtchn %lu\n", xbusd->xbusd_path, revtchn);
+
+	bmk_snprintf(path, sizeof(path), "%s/feature-persistent", xbusd->xbusd_otherend);
+	xbdi->persistent = xenbus_read_integer(path);
+	bmk_printf("xbdback %s: connect persistent %u\n", xbusd->xbusd_path, xbdi->persistent);
 
 	bmk_snprintf(path, sizeof(path), "%s/protocol", xbusd->xbusd_otherend);
 	message = xenbus_read(XBT_NIL, path, &xsproto);
@@ -889,7 +909,6 @@ xbdback_connect(struct xbdback_instance *xbdi)
 	xbdi->xbdi_status = WAITING;
 
 	/* enable the xbdback event handler machinery */
-	XENPRINTF(("Before unmasking\n"));
 	minios_unmask_evtchn(xbdi->xbdi_evtchn);
 	minios_notify_remote_via_evtchn(xbdi->xbdi_evtchn);
 
@@ -913,7 +932,7 @@ err:
 static void
 xbdback_disconnect(struct xbdback_instance *xbdi)
 {
-	XENPRINTF(("xbdback_disconnect\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	spin_lock(&xbdi->xbdi_lock);
 	XENPRINTF(("xbdback_disconnect: inside spinlock"));
@@ -944,7 +963,7 @@ xbdback_frontend_changed(char *path, struct xbdback_instance* xbdi)
 	struct xenbus_device *xbusd = xbdi->xbdi_xbusd;
 
 	int new_state = xenbus_read_integer(path);
-	XENPRINTF(("xbdback %s: new state %d\n", xbusd->xbusd_path, new_state));
+	XENPRINTF(("%s %s: new state %d\n", __func__, xbusd->xbusd_path, new_state));
 	switch(new_state) {
 	case XenbusStateInitialising:
 		break;
@@ -980,13 +999,6 @@ xbdback_backend_changed(char *phy_path, struct xbdback_instance *xbdi)
 	xenbus_transaction_t xbt;
 	struct xenbus_device *xbusd = xbdi->xbdi_xbusd;
 	char xbusd_path[64];
-
-#if 0
-	/* give us a rump kernel context */
-    	rumpuser__hyp.hyp_schedule();
-    	rumpuser__hyp.hyp_lwproc_newlwp(0);
-    	rumpuser__hyp.hyp_unschedule();
-#endif
 
 	bmk_snprintf(xbusd_path, sizeof(xbusd_path), "%s", xbusd->xbusd_path);
 	bmk_snprintf(path, sizeof(path), "%s/physical-device", xbusd_path);
@@ -1068,6 +1080,14 @@ again:
 		    xbusd_path);
 		goto abort;
 	}
+	msg = xenbus_printf(xbt, xbusd_path, "feature-persistent",
+	    "%u", 1);
+	if (msg) {
+		bmk_printf("xbdback: failed to write %s/feature-persistent\n",
+		    xbusd_path);
+		goto abort;
+	}
+
 	msg = xenbus_transaction_end(xbt, 0, &retry);
 	if (msg) {
 		bmk_printf("xbdback %s: can't end transaction\n",
@@ -1093,7 +1113,7 @@ abort:
 static void
 xbdback_finish_disconnect(struct xbdback_instance *xbdi)
 {
-	XENPRINTF(("Finish disconnect\n"));
+	XENPRINTF(("%s\n", __func__));
 	bmk_assert(!spin_is_locked(&xbdi->xbdi_lock));
 	bmk_assert(xbdi->xbdi_status == DISCONNECTING);
 
@@ -1134,15 +1154,13 @@ xbdback_thread(void *arg)
 {
 	struct xbdback_instance *xbdi = arg;
 
-//#if 0
 	/* give us a rump kernel context */
     	rumpuser__hyp.hyp_schedule();
     	rumpuser__hyp.hyp_lwproc_newlwp(0);
-    	rumpuser__hyp.hyp_unschedule();
-//#endif
+	rumpuser__hyp.hyp_unschedule();
 
 	for (;;) {
-		XENPRINTF(("xbdback_thread\n"));
+		XENPRINTF(("%s\n", __func__));
 		bmk_platform_splhigh();
 		spin_lock(&xbdi->xbdi_lock);
 		XENPRINTF(("xbdback_thread: inside spinlock\n"));
@@ -1208,7 +1226,7 @@ xbdback_co_main(struct xbdback_instance *xbdi, void *obj)
 {
 	(void)obj;
 
-	XENPRINTF(("xbdback_co_main\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	xbdi->xbdi_req_prod = xbdi->xbdi_ring.ring_n.sring->req_prod;
 	rmb(); /* ensure we see all requests up to req_prod */
@@ -1230,10 +1248,8 @@ static void *
 xbdback_co_main_loop(struct xbdback_instance *xbdi, void *obj) 
 {
 	blkif_request_t *req;
-	//blkif_x86_32_request_t *req32;
-	//blkif_x86_64_request_t *req64;
 
-	XENPRINTF(("xbdback_co_main_loop\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	(void)obj;
 	req = &xbdi->xbdi_xen_req;
@@ -1286,11 +1302,9 @@ xbdback_co_main_incr(struct xbdback_instance *xbdi, void *obj)
 	(void)obj;
 	blkif_back_ring_t *ring = &xbdi->xbdi_ring.ring_n;
 
-	XENPRINTF(("xbdback_co_main_incr\n"));
+	XENPRINTF(("%s\n", __func__));
 
-//	rmb();
 	ring->req_cons++;
-//	wmb();
 
 	/*
 	 * Do not bother with locking here when checking for xbdi_status: if
@@ -1321,7 +1335,7 @@ xbdback_co_main_done(struct xbdback_instance *xbdi, void *obj)
 {
 	(void)obj;
 
-	XENPRINTF(("xbdback_co_main_done\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	if (xbdi->xbdi_io != NULL) {
 		bmk_assert(xbdi->xbdi_io->xio_operation == BLKIF_OP_READ ||
@@ -1343,7 +1357,7 @@ xbdback_co_main_done2(struct xbdback_instance *xbdi, void *obj)
 {
 	int work_to_do;
 
-	XENPRINTF(("xbdback_co_main_done2\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	wmb();
 	RING_FINAL_CHECK_FOR_REQUESTS(&xbdi->xbdi_ring.ring_n, work_to_do);
@@ -1363,7 +1377,7 @@ xbdback_co_cache_flush(struct xbdback_instance *xbdi, void *obj)
 {
 	(void)obj;
 
-	XENPRINTF(("xbdback_co_cache_flush %p %p\n", xbdi, obj));
+	XENPRINTF(("%s %p %p\n", __func__, xbdi, obj));
 
 	if (xbdi->xbdi_io != NULL) {
 		/* Some I/Os are required for this instance. Process them. */
@@ -1383,7 +1397,7 @@ xbdback_co_cache_flush2(struct xbdback_instance *xbdi, void *obj)
 {
 	(void)obj;
 	
-	XENPRINTF(("xbdback_co_cache_flush2 %p %p\n", xbdi, obj));
+	XENPRINTF(("%s %p %p\n", __func__, xbdi, obj));
 
 	if (__atomic_load_n(&(xbdi)->xbdi_pendingreqs, __ATOMIC_RELAXED) > 0) {
 		/*
@@ -1404,7 +1418,7 @@ xbdback_co_cache_doflush(struct xbdback_instance *xbdi, void *obj)
 {
 	struct xbdback_io *xbd_io;
 
-	XENPRINTF(("xbdback_co_cache_doflush %p %p\n", xbdi, obj));
+	XENPRINTF(("%s %p %p\n", __func__, xbdi, obj));
 
 	xbd_io = xbdi->xbdi_io = obj;
 	xbd_io->xio_xbdi = xbdi;
@@ -1423,23 +1437,15 @@ xbdback_co_io(struct xbdback_instance *xbdi, void *obj)
 {	
 	int error;
 	blkif_request_t *req;
-	//blkif_x86_32_request_t *req32;
-	//blkif_x86_64_request_t *req64;
 
 	(void)obj;
 
-	XENPRINTF(("xbdback_co_io\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	/* some sanity checks */
 	req = &xbdi->xbdi_xen_req;
 	if (req->nr_segments < 1 ||
 	    req->nr_segments > BLKIF_MAX_SEGMENTS_PER_REQUEST) {
-		/*if (ratecheck(&xbdi->xbdi_lasterr_time,
-		    &xbdback_err_intvl)) {
-			printf("%s: invalid number of segments: %d\n",
-			       xbdi->xbdi_name,
-			       xbdi->xbdi_xen_req.nr_segments);
-		}*/
 		error = BMK_EINVAL;
 		goto end;
 	}
@@ -1461,22 +1467,8 @@ xbdback_co_io(struct xbdback_instance *xbdi, void *obj)
 		/* already copied in xbdback_co_main_loop */
 		break;
 	case XBDIP_32:
-		bmk_platform_halt("xbdback_co_main_loop: We don't support 32bit requests now\n");
-		/*
-		req32 = RING_GET_REQUEST(&xbdi->xbdi_ring.ring_32,
-		    xbdi->xbdi_ring.ring_n.req_cons);
-		for (i = 0; i < req->nr_segments; i++)
-			req->seg[i] = req32->seg[i];
-		*/
-		break;
 	case XBDIP_64:
-		bmk_platform_halt("xbdback_co_main_loop: We don't support 64bit requests now\n");
-		/*
-		req64 = RING_GET_REQUEST(&xbdi->xbdi_ring.ring_64,
-		    xbdi->xbdi_ring.ring_n.req_cons);
-		for (i = 0; i < req->nr_segments; i++)
-			req->seg[i] = req64->seg[i];
-		*/
+		bmk_platform_halt("xbdback_co_main_loop: We only support native requests now\n");
 		break;
 	}
 
@@ -1500,7 +1492,7 @@ xbdback_co_io_gotreq(struct xbdback_instance *xbdi, void *obj)
 {
 	struct xbdback_request *xrq;
 
-	XENPRINTF(("xbdback_co_io_gotreq\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	xrq = xbdi->xbdi_req = obj;
 	
@@ -1521,15 +1513,15 @@ xbdback_co_io_gotreq(struct xbdback_instance *xbdi, void *obj)
 	if (xbdi->xbdi_io != NULL) {
 		struct xbdback_request *last_req;
 		last_req = SLIST_FIRST(&xbdi->xbdi_io->xio_rq)->car;
-		XENPRINTF(("xbdback_io domain %d: hoping for sector %" PRIu64
-		    "; got %" PRIu64 "\n", xbdi->xbdi_domid,
+		XENPRINTF(("%s domain %d: hoping for sector %" PRIu64
+		    "; got %" PRIu64 "\n", __func__, xbdi->xbdi_domid,
 		    xbdi->xbdi_next_sector,
 		    xbdi->xbdi_xen_req.sector_number));
 		if ((xrq->rq_operation != last_req->rq_operation)
 		    || (xbdi->xbdi_xen_req.sector_number !=
 		    xbdi->xbdi_next_sector)) {
-			XENPRINTF(("xbdback_io domain %d: segment break\n",
-			    xbdi->xbdi_domid));
+			XENPRINTF(("%s domain %d: segment break\n",
+			    __func__, xbdi->xbdi_domid));
 			xbdi->xbdi_next_sector =
 			    xbdi->xbdi_xen_req.sector_number;
 			bmk_assert(xbdi->xbdi_io->xio_operation == BLKIF_OP_READ ||
@@ -1549,7 +1541,7 @@ xbdback_co_io_loop(struct xbdback_instance *xbdi, void *obj)
 {
 	(void)obj;
 	
-	XENPRINTF(("xbdback_co_io_loop\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	bmk_assert(xbdi->xbdi_req->rq_operation == BLKIF_OP_READ ||
 	    xbdi->xbdi_req->rq_operation == BLKIF_OP_WRITE);
@@ -1565,9 +1557,9 @@ xbdback_co_io_loop(struct xbdback_instance *xbdi, void *obj)
 		this_fs = xbdi->xbdi_xen_req.seg[xbdi->xbdi_segno].first_sect;
 		this_ls = xbdi->xbdi_xen_req.seg[xbdi->xbdi_segno].last_sect;
 		thisgrt = xbdi->xbdi_xen_req.seg[xbdi->xbdi_segno].gref;
-		XENPRINTF(("xbdback_io domain %d: "
+		XENPRINTF(("%s domain %d: "
 			   "first,last_sect[%d]=0%o,0%o\n",
-			   xbdi->xbdi_domid, xbdi->xbdi_segno,
+			   __func__, xbdi->xbdi_domid, xbdi->xbdi_segno,
 			   this_fs, this_ls));
 		last_ls = xbdi->xbdi_last_ls = xbdi->xbdi_this_ls;
 		xbdi->xbdi_this_fs = this_fs;
@@ -1588,13 +1580,6 @@ xbdback_co_io_loop(struct xbdback_instance *xbdi, void *obj)
 				  && 0 /* can't know frame number yet */
 #endif
 			    ) {
-#ifdef DEBUG
-				/*if (ratecheck(&xbdi->xbdi_lastfragio_time,
-				    &xbdback_fragio_intvl))
-					printf("%s: domain is sending"
-					    " excessively fragmented I/O\n",
-					    xbdi->xbdi_name);*/
-#endif
 				bmk_printf("xbdback_io: would maybe glue "
 				    "same page sec %d (%d->%d)\n",
 				    xbdi->xbdi_segno, this_fs, this_ls);
@@ -1635,7 +1620,7 @@ xbdback_co_io_gotio(struct xbdback_instance *xbdi, void *obj)
 	vaddr_t start_offset; /* start offset in vm area */
 	int buf_flags, i;
 
-	XENPRINTF(("xbdback_co_io_gotio\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	xbdi_get(xbdi);
  	__atomic_fetch_add(&(xbdi)->xbdi_pendingreqs, 1,  __ATOMIC_ACQ_REL);	
@@ -1671,7 +1656,6 @@ xbdback_co_io_gotio(struct xbdback_instance *xbdi, void *obj)
 		xbd_io->xio_buf[i].b_iodone = xbdback_iodone;
 		xbd_io->xio_buf[i].b_proc = NULL;
 		xbd_io->xio_buf[i].b_vp = xbdi->xbdi_vp;
-		//xbd_io->xio_buf.b_objlock = xbdi->xbdi_vp->v_interlock;
 		xbd_io->xio_buf[i].b_dev = xbdi->xbdi_dev;
 		xbd_io->xio_buf[i].b_blkno = xbdi->xbdi_next_sector;
 		xbd_io->xio_buf[i].b_bcount = 0;
@@ -1689,7 +1673,7 @@ xbdback_co_io_gotio2(struct xbdback_instance *xbdi, void *obj)
 {
 	(void)obj;
 	
-	XENPRINTF(("xbdback_co_io_gotio2\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	if (xbdi->xbdi_segno == 0 || SLIST_EMPTY(&xbdi->xbdi_io->xio_rq)) {
 		/* if this is the first segment of a new request */
@@ -1707,7 +1691,7 @@ xbdback_co_io_gotfrag(struct xbdback_instance *xbdi, void *obj)
 {
 	struct xbdback_fragment *xbd_fr;
 
-	XENPRINTF(("xbdback_co_io_gotfrag\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	xbd_fr = obj;
 	xbd_fr->car = xbdi->xbdi_req;
@@ -1726,7 +1710,7 @@ xbdback_co_io_gotfrag2(struct xbdback_instance *xbdi, void *obj)
 	int seg_size;
 	uint8_t this_fs, this_ls;
 
-	XENPRINTF(("xbdback_co_io_gotfrag2\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	this_fs = xbdi->xbdi_this_fs;
 	this_ls = xbdi->xbdi_this_ls;
@@ -1780,7 +1764,7 @@ xbdback_co_map_io(struct xbdback_instance *xbdi, void *obj)
 static void
 xbdback_io_error(struct xbdback_io *xbd_io, int error)
 {
-	XENPRINTF(("xbdback_io_error\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	xbd_io->xio_buf[0].b_error = error;
 	xbdback_iodone(&xbd_io->xio_buf[0]);
@@ -1796,7 +1780,7 @@ xbdback_co_do_io(struct xbdback_instance *xbdi, void *obj)
 	struct xbdback_io *xbd_io = xbdi->xbdi_io;
 	int i, seg_size, next_sector = 0;
 
-	XENPRINTF(("xbdback_co_do_io\n"));
+	XENPRINTF(("%s\n", __func__));
 
 	switch (xbd_io->xio_operation) {
 	case BLKIF_OP_FLUSH_DISKCACHE:
@@ -1836,8 +1820,7 @@ xbdback_co_do_io(struct xbdback_instance *xbdi, void *obj)
 		for(i = 0; i < xbd_io->xio_nrma; i++) {
 			xbd_io->xio_buf[i].b_data = (void *)
 		    		((vaddr_t)xbd_io->xio_buf[i].b_data 
-				 + xbd_io->xio_vaddr
-				 + i * BMK_PCPU_PAGE_SIZE);
+				 + xbd_io->xio_vaddr[i]);
 
 			xbd_io->xio_buf[i].b_blkno += next_sector;
 			seg_size =  xbd_io->xio_buf[i].b_bcount / VBD_BSIZE;
@@ -1905,8 +1888,8 @@ xbdback_iodone(struct buf *bp)
 	xbd_io = bp->b_private;
 	xbdi = xbd_io->xio_xbdi;
 
-	XENPRINTF(("xbdback_iodone %d: iodone ptr 0x%lx\n",
-		   xbdi->xbdi_domid, (long)xbd_io));
+	XENPRINTF(("%s %d: iodone ptr 0x%lx\n",
+		   __func__, xbdi->xbdi_domid, (long)xbd_io));
 
 	xbd_io->xio_done++;
 	if(xbd_io->xio_done != xbd_io->xio_nrma)
@@ -1962,7 +1945,7 @@ xbdback_iodone(struct buf *bp)
 	xbdi_put(xbdi);
 	__atomic_fetch_sub(&(xbdi)->xbdi_pendingreqs, 1,  __ATOMIC_ACQ_REL);
     	rumpuser__hyp.hyp_schedule();
-	rump_xbdback_buf_destroy(xbd_io->xio_buf, xbd_io->xio_nrma);
+	rump_xbdback_buf_destroy(xbd_io->xio_buf, BLKIF_MAX_PAGES_PER_REQUEST);
     	rumpuser__hyp.hyp_unschedule();
 	xbdback_pool_put(xbdback_io_pool, xbd_io);
 	xbdback_wakeup_thread(xbdi);
@@ -1994,11 +1977,9 @@ xbdback_send_reply(struct xbdback_instance *xbdi, uint64_t id,
     int op, int status)
 {
 	blkif_response_t *resp_n;
-	//blkif_x86_32_response_t *resp32;
-	//blkif_x86_64_response_t *resp64;
 	int notify;
 
-	XENPRINTF(("xbdback_send_reply: status %d op %d\n", status, op));
+	XENPRINTF(("%s: status %d op %d\n", __func__, status, op));
 	/*
 	 * The ring can be accessed by the xbdback thread, xbdback_iodone()
 	 * handler, or any handler that triggered the shm callback. So
@@ -2006,7 +1987,7 @@ xbdback_send_reply(struct xbdback_instance *xbdi, uint64_t id,
 	 */
 	bmk_platform_splhigh();
 	spin_lock(&xbdi->xbdi_lock);
-	XENPRINTF(("xbdback_send_reply: inside spin lock\n"));
+	XENPRINTF(("%s: inside spin lock\n", __func__));
 
 	switch (xbdi->xbdi_proto) {
 	case XBDIP_NATIVE:
@@ -2017,39 +1998,48 @@ xbdback_send_reply(struct xbdback_instance *xbdi, uint64_t id,
 		resp_n->status    = status;
 		break;
 	case XBDIP_32:
-		bmk_platform_halt("Send Reply: We don't support ring 32bit now\n");
-		/*
-		resp32 = RING_GET_RESPONSE(&xbdi->xbdi_ring.ring_32,
-		    xbdi->xbdi_ring.ring_n.rsp_prod_pvt);
-		resp32->id        = id;
-		resp32->operation = op;
-		resp32->status    = status;
-		*/
-		break;
 	case XBDIP_64:
-		bmk_platform_halt("Send Reply: We don't support ring 64bit now\n");
-		/*
-		resp64 = RING_GET_RESPONSE(&xbdi->xbdi_ring.ring_64,
-		    xbdi->xbdi_ring.ring_n.rsp_prod_pvt);
-		resp64->id        = id;
-		resp64->operation = op;
-		resp64->status    = status;
-		*/
+		bmk_platform_halt("xbdback_send_reply: \
+				We only support native protocol for now\n");
 		break;
 	default:
-		bmk_platform_halt("Send Reply: Unknown protocol\n");
+		bmk_platform_halt("xbdback_send_reply: Unknown protocol\n");
 
 	}
 	xbdi->xbdi_ring.ring_n.rsp_prod_pvt++;
 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&xbdi->xbdi_ring.ring_n, notify);
-	XENPRINTF(("xbdback_send_reply: outside spin lock\n"));
+	XENPRINTF(("%s: outside spin lock\n", __func__));
 	spin_unlock(&xbdi->xbdi_lock);
 
 	if (notify) {
-		XENPRINTF(("xbdback_send_reply notify %d\n", xbdi->xbdi_domid));
+		XENPRINTF(("%s notify %d\n", __func__, xbdi->xbdi_domid));
 		minios_notify_remote_via_evtchn(xbdi->xbdi_evtchn);
 	}
 	bmk_platform_splx(0);
+}
+
+static vaddr_t get_page_from_gref_table(grant_ref_t ref, uint8_t op)
+{
+	if(ref >= GREF_TABLE_SIZE) {
+		bmk_printf("%s: very big gref = %u", __func__, ref);
+		bmk_platform_halt(NULL);
+	}
+
+	//if(gref_table[ref].op != op)
+	//	bmk_printf("Warning: Operation didn't match\n");
+
+	return gref_table[ref].page;
+}
+
+static void put_page_to_gref_table(grant_ref_t ref, vaddr_t page, uint8_t op)
+{
+	if(ref >= GREF_TABLE_SIZE) {
+		bmk_printf("%s: very big gref = %u", __func__, ref);
+		bmk_platform_halt(NULL);
+	}
+
+	gref_table[ref].page = page;
+	gref_table[ref].op = op;
 }
 
 /*
@@ -2061,9 +2051,9 @@ xbdback_map_shm(struct xbdback_io *xbd_io)
 {
 	struct xbdback_instance *xbdi;
 	struct xbdback_request *xbd_rq;
-	int error;
+	int error, i;
 
-	XENPRINTF(("xbdback_map_shm\n"));
+	XENPRINTF(("%s\n", __func__));
 
 #ifdef XENDEBUG_VBD
 	printf("xbdback_map_shm map grant ");
@@ -2076,18 +2066,30 @@ xbdback_map_shm(struct xbdback_io *xbd_io)
 
 	xbdi = xbd_io->xio_xbdi;
 	xbd_rq = SLIST_FIRST(&xbd_io->xio_rq)->car;
-	
-	xbd_io->xio_vaddr = gntmap_map_grant_refs_new(&xbdi->xbdi_entry_map, 
-			xbd_io->xio_nrma, 
-			&xbdi->xbdi_domid, 
-			0, 
-			xbd_io->xio_gref, 
-			(xbd_rq->rq_operation == BLKIF_OP_WRITE) ? 0 : 1);
 
-	if(xbd_io->xio_vaddr > 0)
-		error = 0;
-	else
-		error = xbd_io->xio_vaddr;
+	for(i = 0; i < xbd_io->xio_nrma; i++) {
+		if (xbdi->persistent == 1)
+			xbd_io->xio_vaddr[i] = get_page_from_gref_table(
+					xbd_io->xio_gref[i],
+					(xbd_rq->rq_operation == BLKIF_OP_WRITE) ? 1 : 0);
+	
+		if(xbd_io->xio_vaddr[i] == 0)
+			xbd_io->xio_vaddr[i] = (vaddr_t)gntmap_map_grant_refs(
+				&xbdi->xbdi_entry_map,
+				1,
+				&xbdi->xbdi_domid,
+				1,
+				&xbd_io->xio_gref[i],
+				1);
+				//(xbd_rq->rq_operation == BLKIF_OP_WRITE) ? 0 : 1);
+
+		if(xbd_io->xio_vaddr[i] > 0)
+			error = 0;
+		else {
+			error = xbd_io->xio_vaddr[i];
+			break;
+		}
+	}
 
 	switch(error) {
 	case 0:
@@ -2102,31 +2104,10 @@ xbdback_map_shm(struct xbdback_io *xbd_io)
 		return xbdi;
 	case -BMK_ENOMEM:
 		bmk_platform_halt("gntmap_map_grant_refs failed\n");
-		//TODO
-#if 0
-		int s = splvm();
-		if (!xbdback_shmcb) {
-			if (xen_shm_callback(xbdback_shm_callback, xbdi)
-			    != 0) {
-				splx(s);
-				panic("xbdback_map_shm: "
-				      "xen_shm_callback failed");
-			}
-			xbdback_shmcb = 1;
-		}
-		SIMPLEQ_INSERT_TAIL(&xbdback_shmq, xbdi, xbdi_on_hold);
-		splx(s);
-		/* Put the thread to sleep until the callback is called */
-		xbdi->xbdi_cont = xbdback_co_wait_shm_callback;
-#endif
 		return NULL;
 
 	default:
-		/*
-		if (ratecheck(&xbdi->xbdi_lasterr_time, &xbdback_err_intvl)) {
-			printf("xbdback_map_shm: xen_shm error %d ", error);
-		}
-		*/
+		bmk_printf("xbdback_map_shm: xen_shm error %d ", error);
 		xbdback_io_error(xbdi->xbdi_io, error);
 		xbdi->xbdi_io = NULL;
 		xbdi->xbdi_cont = xbdi->xbdi_cont_aux;
@@ -2134,91 +2115,14 @@ xbdback_map_shm(struct xbdback_io *xbd_io)
 	}
 }
 
-#if 0
-static int
-xbdback_shm_callback(void *arg)
-{
-        int error, s;
-
-	/*
-	 * The shm callback may be executed at any level, including
-	 * IPL_BIO and IPL_NET levels. Raise to the lowest priority level
-	 * that can mask both.
-	 */
-	s = splvm();
-	while(!SIMPLEQ_EMPTY(&xbdback_shmq)) {
-		struct xbdback_instance *xbdi;
-		struct xbdback_io *xbd_io;
-		struct xbdback_request *xbd_rq;
-		
-		xbdi = SIMPLEQ_FIRST(&xbdback_shmq);
-		xbd_io = xbdi->xbdi_io;
-		xbd_rq = SLIST_FIRST(&xbd_io->xio_rq)->car;
-	
-		bmk_assert(xbd_io->xio_mapped == 0);
-		
-/*		error = xen_shm_map(xbd_io->xio_nrma,
-		    xbdi->xbdi_domid, xbd_io->xio_gref,
-		    &xbd_io->xio_vaddr, xbd_io->xio_gh, 
-		    XSHM_CALLBACK |
-		    ((xbd_rq->rq_operation == BLKIF_OP_WRITE) ? XSHM_RO: 0));
-*/
-		error = gntmap_map_grant_refs_n(&xbdi->xbdi_entry_map, xbd_io->xio_nrma, 
-				&xbdi->xbdi_domid, 0, xbd_io->xio_gref, XSHM_CALLBACK | 
-				(xbd_rq->rq_operation == BLKIF_OP_WRITE) ? 1 : 0, xbd_io->xio_vaddr);
-	
-		switch(error) {
-		case ENOMEM:
-			splx(s);
-			return -1; /* will try again later */
-		case 0:
-			SIMPLEQ_REMOVE_HEAD(&xbdback_shmq, xbdi_on_hold);
-			xbd_io->xio_mapped = 1;
-			xbdback_wakeup_thread(xbdi);
-			break;
-		default:
-			SIMPLEQ_REMOVE_HEAD(&xbdback_shmq, xbdi_on_hold);
-			printf("xbdback_shm_callback: xen_shm error %d\n",
-			       error);
-			xbdback_io_error(xbd_io, error);
-			xbdi->xbdi_io = NULL;
-			xbdback_wakeup_thread(xbdi);
-			break;
-		}
-	}
-	xbdback_shmcb = 0;
-	splx(s);
-	return 0;
-}
-
-/*
- * Allows waiting for the shm callback to complete.
- */
-static void *
-xbdback_co_wait_shm_callback(struct xbdback_instance *xbdi, void *obj)
-{
-
-	if (xbdi->xbdi_io == NULL || xbdi->xbdi_io->xio_mapped == 1) {
-		/*
-		 * Only proceed to next step when the callback reported
-		 * success or failure.
-		 */
-		xbdi->xbdi_cont = xbdi->xbdi_cont_aux;
-		return xbdi;
-	} else {
-		/* go back to sleep */
-		return NULL;
-	}
-}
-#endif
-
 /* unmap a request from our virtual address space (request is done) */
 static void
 xbdback_unmap_shm(struct xbdback_io *xbd_io)
 {
-//	int j;
+	int j;
 	struct xbdback_instance *xbdi = xbd_io->xio_xbdi; /* our xbd instance */
-	XENPRINTF(("xbdback_unmap_shm\n"));
+	struct xbdback_request *xbd_rq = SLIST_FIRST(&xbd_io->xio_rq)->car;
+	XENPRINTF(("%s\n", __func__));
 
 #ifdef XENDEBUG_VBD
 	int i;
@@ -2231,9 +2135,17 @@ xbdback_unmap_shm(struct xbdback_io *xbd_io)
 
 	bmk_assert(xbd_io->xio_mapped == 1);
 	xbd_io->xio_mapped = 0;
- 	if (gntmap_munmap_new(&xbdi->xbdi_entry_map, xbd_io->xio_vaddr,
-			       xbd_io->xio_nrma) != 0) {
-		bmk_printf("xbdback_unmap_shm: unmapping failed\n");
+
+	for (j = 0; j < xbd_io->xio_nrma; j++) {
+		if (xbdi->persistent == 1) {
+			put_page_to_gref_table(xbd_io->xio_gref[j],
+					xbd_io->xio_vaddr[j],
+					(xbd_rq->rq_operation == BLKIF_OP_WRITE) ? 1 : 0);
+		}
+		else if (gntmap_munmap(&xbdi->xbdi_entry_map, *xbd_io->xio_vaddr,
+			       1) != 0) {
+			bmk_printf("xbdback_unmap_shm: unmapping failed\n");
+		}
 	}
 }
 
