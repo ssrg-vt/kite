@@ -51,7 +51,10 @@ struct netback_dev {
     netif_rx_back_ring_t rx;
     grant_ref_t tx_ring_ref;
     grant_ref_t rx_ring_ref;
+
     evtchn_port_t evtchn;
+    evtchn_port_t revtchn;
+    evtchn_port_t tevtchn;
 
     struct gntmap rx_map;
     struct gntmap tx_map;
@@ -139,7 +142,7 @@ static void netback_tx_response(struct netback_dev *dev, int id, int status) {
 
     RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&dev->tx, do_event);
     if (do_event) {
-        minios_notify_remote_via_evtchn(dev->evtchn);
+        minios_notify_remote_via_evtchn(dev->tevtchn);
     }
 }
 
@@ -269,6 +272,25 @@ static void netback_handler(evtchn_port_t port, struct pt_regs *regs,
     spin_unlock(&netback_lock);
 }
 
+static void netback_rx_handler(evtchn_port_t port, struct pt_regs *regs,
+                            void *data) {
+    struct netback_dev *dev = data;
+
+    bmk_printf("netback_rx_handler\n");
+    spin_lock(&netback_lock);
+    network_rx_buf_gc(dev);
+    spin_unlock(&netback_lock);
+}
+
+static void netback_tx_handler(evtchn_port_t port, struct pt_regs *regs,
+                            void *data) {
+    struct netback_dev *dev = data;
+
+    spin_lock(&netback_lock);
+    network_tx(dev);
+    spin_unlock(&netback_lock);
+}
+
 static void free_netback(struct netback_dev *dev) {
     int i;
 
@@ -302,13 +324,14 @@ netback_init(char *_nodename,
              unsigned char rawmac[6], char **ip, void *priv, char *vifname) {
     xenbus_transaction_t xbt;
     char *err, *message = NULL;
-    int i, revtchn, rc, retry = 0;
+    int i, revtchn, tevtchn, rc, retry = 0;
     char path[256];
     uint64_t rx_copy;
     uint32_t id;
     struct netif_tx_sring *txs = NULL;
     struct netif_rx_sring *rxs = NULL;
     struct netback_dev *dev;
+    uint8_t split_channel = 0;
 
     dev = bmk_memcalloc(1, sizeof(*dev), BMK_MEMWHO_WIREDBMK);
     bmk_snprintf(path, sizeof(path), "domid");
@@ -368,6 +391,12 @@ again:
     err = xenbus_printf(xbt, dev->nodename, "feature-rx-flip", "%u", 1);
     if (err) {
         message = "writing feature-rx-flip";
+        goto abort_transaction;
+    }
+
+    err = xenbus_printf(xbt, dev->nodename, "feature-split-event-channels", "%u", 1);
+    if (err) {
+        message = "writing feature-split-event-channels";
         goto abort_transaction;
     }
 
@@ -468,8 +497,22 @@ done:
     bmk_snprintf(path, sizeof(path), "%s/event-channel", dev->frontend);
     revtchn = xenbus_read_integer(path);
     if (revtchn < 0) {
-        bmk_printf("Reading event-channel failed\n");
-        goto error;
+	bmk_printf("Using split event channel\n");
+	bmk_snprintf(path, sizeof(path), "%s/event-channel-tx", dev->frontend);
+	tevtchn = xenbus_read_integer(path);
+	if (tevtchn < 0) {
+		bmk_printf("Reading event-channel-tx failed\n");
+		goto error;
+	}
+
+	bmk_snprintf(path, sizeof(path), "%s/event-channel-rx", dev->frontend);
+	revtchn = xenbus_read_integer(path);
+	if (revtchn < 0) {
+		bmk_printf("Reading event-channel-rx failed\n");
+		goto error;
+	}
+
+	split_channel = 1;
     }
 
     bmk_snprintf(path, sizeof(path), "%s/request-rx-copy", dev->frontend);
@@ -501,13 +544,31 @@ done:
     }
     BACK_RING_INIT(&dev->rx, rxs, PAGE_SIZE);
 
-    rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn, netback_handler,
+    if (split_channel == 0) {
+	    rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn, netback_handler,
                                         dev, &dev->evtchn);
-    if (rc)
-        goto error2;
+	    if (rc)
+		    goto error2;
 
-    minios_unmask_evtchn(dev->evtchn);
-    minios_notify_remote_via_evtchn(dev->evtchn);
+	    dev->revtchn = dev->tevtchn = dev->evtchn;
+	    minios_unmask_evtchn(dev->evtchn);
+	    minios_notify_remote_via_evtchn(dev->evtchn);
+    } else {
+	    rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn,
+			netback_rx_handler, dev, &dev->revtchn);
+	    if (rc)
+		    goto error2;
+
+	    rc = minios_evtchn_bind_interdomain(dev->front_id, tevtchn,
+			    netback_tx_handler, dev, &dev->tevtchn);
+	    if (rc)
+		    goto error2;
+
+	    minios_unmask_evtchn(dev->revtchn);
+	    minios_unmask_evtchn(dev->tevtchn);
+	    minios_notify_remote_via_evtchn(dev->revtchn);
+	    minios_notify_remote_via_evtchn(dev->tevtchn);
+    }
 
     bmk_snprintf(path, sizeof(path), "%s/state", dev->nodename);
     err = xenbus_switch_state(XBT_NIL, path, XenbusStateConnected);
@@ -679,7 +740,7 @@ void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
 
     rmb();
     if (notify)
-        minios_notify_remote_via_evtchn(dev->evtchn);
+        minios_notify_remote_via_evtchn(dev->revtchn);
 
     bmk_platform_splhigh();
     spin_lock(&netback_lock);
