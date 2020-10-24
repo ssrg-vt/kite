@@ -55,14 +55,10 @@ struct gntmap_entry {
 
 struct AddrQueue *queue;
 
-struct AddrQueue *create_addr_queue(void);
-//int is_addr_queue_full(void);
-//int is_addr_queue_empty(void);
-//unsigned long get_addr_from_list(void);
-//void add_addr_to_list(unsigned long item);
-void destroy_addr_queue(void);
+//struct AddrQueue *gntmap_create_addr_queue(void);
+//void gntmap_destroy_addr_queue(void);
 
-struct AddrQueue *create_addr_queue(void) {
+struct AddrQueue *gntmap_create_addr_queue(void) {
     queue = (struct AddrQueue *)bmk_memcalloc(1, sizeof(struct AddrQueue),
                                               BMK_MEMWHO_WIREDBMK);
     if (queue == NULL) {
@@ -114,7 +110,7 @@ static inline unsigned long get_addr_from_list(void) {
     return item;
 }
 
-void destroy_addr_queue(void) {
+void gntmap_destroy_addr_queue(void) {
     bmk_memfree(queue, BMK_MEMWHO_WIREDBMK);
 }
 

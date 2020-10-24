@@ -20,8 +20,8 @@ struct AddrQueue {
 	unsigned long *array;
 }; 
  
-struct AddrQueue* create_addr_queue(void);
-void destroy_addr_queue(void);
+struct AddrQueue* gntmap_create_addr_queue(void);
+void gntmap_destroy_addr_queue(void);
 
 static inline int
 gntmap_map2order(unsigned long count)

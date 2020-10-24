@@ -77,7 +77,8 @@ ${MAINOBJ}: ${OBJS} platformlibs xenlibs
 	    -L${RROBJLIB}/libbmk_core -L${RROBJLIB}/libbmk_rumpuser \
 	    -Wl,--whole-archive -lbmk_rumpuser -lbmk_core -Wl,--no-whole-archive
 	${OBJCOPY} -w -G bmk_* -G rumpuser_* -G jsmn_* -G minios_* -G xenbus_* \
-	    -G rumprun_platform_rumpuser_init -G _start -G netback_* $@
+	    -G rumprun_platform_rumpuser_init -G _start -G netback_* \
+	    -G gntmap_* -G gnttab_* -G _minios_* $@
 
 clean: commonclean
 	rm -f ${OBJS_BMK} include/hw/machine buildtest ${MAINOBJ}
