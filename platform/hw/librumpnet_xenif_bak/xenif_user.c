@@ -85,7 +85,7 @@ struct threadblk {
     char _pad[48]; /* FIXME: better way to avoid false sharing */
 };
 
-typedef enum {WAITING, RUN, DISCONNECTING, DISCONNECTED} xennet_state_t;
+typedef enum {WAITING, RUN, RUN_TX, RUN_RX, DISCONNECTING, DISCONNECTED} xennet_state_t;
 
 struct net_buffer {
     void *page;
@@ -106,7 +106,10 @@ struct netback_dev {
     netif_rx_back_ring_t rx;
     grant_ref_t tx_ring_ref;
     grant_ref_t rx_ring_ref;
+
     evtchn_port_t evtchn;
+    evtchn_port_t revtchn;
+    evtchn_port_t tevtchn;
 
     struct gntmap rx_map;
     struct gntmap tx_map;
@@ -524,7 +527,7 @@ static void netback_tx_response(struct netback_dev *dev, int id, int status) {
 
     RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&dev->tx, do_event);
     if (do_event) {
-        minios_notify_remote_via_evtchn(dev->evtchn);
+        minios_notify_remote_via_evtchn(dev->tevtchn);
     }
 }
 
@@ -747,6 +750,31 @@ static void netback_handler(evtchn_port_t port, struct pt_regs *regs,
 	bmk_platform_splx(0);
 }
 
+static void netback_tx_handler(evtchn_port_t port, struct pt_regs *regs,
+                            void *data) {
+	struct netback_dev *dev = data;
+	bmk_platform_splhigh();
+	spin_lock(&dev->xennet_lock);
+	/* only set RUN state when we are WAITING for work */
+	if (dev->xennet_status == WAITING)
+	       dev->xennet_status = RUN_TX;
+	xennet_sched_wake(&dev->xennet_thread_blk, dev->xennet_thread);
+	spin_unlock(&dev->xennet_lock);
+	bmk_platform_splx(0);
+}
+
+static void netback_rx_handler(evtchn_port_t port, struct pt_regs *regs,
+                            void *data) {
+	struct netback_dev *dev = data;
+	bmk_platform_splhigh();
+	spin_lock(&dev->xennet_lock);
+	/* only set RUN state when we are WAITING for work */
+	if (dev->xennet_status == WAITING)
+	       dev->xennet_status = RUN_RX;
+	xennet_sched_wake(&dev->xennet_thread_blk, dev->xennet_thread);
+	spin_unlock(&dev->xennet_lock);
+	bmk_platform_splx(0);
+}
 /*
  * Main thread routine for one xbdback instance. Woken up by
  * xbdback_evthandler when a domain has I/O work scheduled in a I/O ring.
@@ -790,6 +818,31 @@ xennet_thread(void *arg)
 				&dev->xennet_thread_blk.status, THREADBLK_STATUS_AWAKE,
                      		__ATOMIC_ACQ_REL) == THREADBLK_STATUS_NOTIFY);
 			break;
+		case RUN_TX:
+			XENPRINTF(("xbdback_thread: run: outside spinlock\n"));
+			dev->xennet_status = WAITING; /* reset state */
+			spin_unlock(&dev->xennet_lock);
+			bmk_platform_splx(0);
+
+			do {
+				network_tx(dev);
+			} while (__atomic_exchange_n(
+				&dev->xennet_thread_blk.status, THREADBLK_STATUS_AWAKE,
+				__ATOMIC_ACQ_REL) == THREADBLK_STATUS_NOTIFY);
+			break;
+		case RUN_RX:
+			XENPRINTF(("xbdback_thread: run: outside spinlock\n"));
+			dev->xennet_status = WAITING; /* reset state */
+			spin_unlock(&dev->xennet_lock);
+			bmk_platform_splx(0);
+
+			do {
+			    	network_rx_buf_gc(dev);
+	      		} while (__atomic_exchange_n(
+				&dev->xennet_thread_blk.status, THREADBLK_STATUS_AWAKE,
+                     		__ATOMIC_ACQ_REL) == THREADBLK_STATUS_NOTIFY);
+			break;
+
 		case DISCONNECTING:
 			XENPRINTF(("xbdback_thread: disconnecting\n"));
 			break;
@@ -833,12 +886,13 @@ netback_init(char *_nodename,
     xenbus_transaction_t xbt;
     char *err, *message = NULL;
     unsigned int i;
-    int revtchn, rc, retry = 0, val;
+    int revtchn, tevtchn, rc, retry = 0, val;
     char path[256];
     uint32_t id;
     struct netif_tx_sring *txs = NULL;
     struct netif_rx_sring *rxs = NULL;
     struct netback_dev *dev;
+    uint8_t split_channel = 0;
 
     dev = bmk_memcalloc(1, sizeof(*dev), BMK_MEMWHO_WIREDBMK);
     bmk_snprintf(path, sizeof(path), "domid");
@@ -896,6 +950,12 @@ again:
     err = xenbus_printf(xbt, dev->nodename, "feature-rx-flip", "%u", 1);
     if (err) {
         message = "writing feature-rx-flip";
+        goto abort_transaction;
+    }
+
+    err = xenbus_printf(xbt, dev->nodename, "feature-split-event-channels", "%u", 1);
+    if (err) {
+    	message = "writing feature-split-event-channels";
         goto abort_transaction;
     }
 
@@ -998,10 +1058,25 @@ done:
     bmk_snprintf(path, sizeof(path), "%s/event-channel", dev->frontend);
     val = xenbus_read_integer(path);
     if (val < 0) {
-        bmk_printf("Reading event-channel failed\n");
-        goto error;
-    }
-    revtchn = val;
+       bmk_printf("Using split event channel\n");
+       bmk_snprintf(path, sizeof(path), "%s/event-channel-tx", dev->frontend);
+       val = xenbus_read_integer(path);
+       if (val < 0) {
+               bmk_printf("Reading event-channel-tx failed\n");
+               goto error;
+       }
+       tevtchn = val;
+
+       bmk_snprintf(path, sizeof(path), "%s/event-channel-rx", dev->frontend);
+       val = xenbus_read_integer(path);
+       if (val < 0) {
+               bmk_printf("Reading event-channel-rx failed\n");
+               goto error;
+       }
+       revtchn = val;
+       split_channel = 1;
+    } else
+    	revtchn = val;
 
     bmk_snprintf(path, sizeof(path), "%s/request-rx-copy", dev->frontend);
     val = xenbus_read_integer(path);
@@ -1042,13 +1117,31 @@ done:
     dev->xennet_thread_blk.header.callback = threadblk_callback;
     dev->xennet_thread_blk.status = THREADBLK_STATUS_AWAKE;
 
-    rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn, netback_handler,
+    if (split_channel == 0) {
+    	rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn, netback_handler,
                                         dev, &dev->evtchn);
-    if (rc)
-        goto error2;
+    	if (rc)
+        	goto error2;
 
-    minios_unmask_evtchn(dev->evtchn);
-    minios_notify_remote_via_evtchn(dev->evtchn);
+	dev->revtchn = dev->tevtchn = dev->evtchn;
+    	minios_unmask_evtchn(dev->evtchn);
+    	minios_notify_remote_via_evtchn(dev->evtchn);
+    } else {
+       rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn,
+                       netback_rx_handler, dev, &dev->revtchn);
+       if (rc)
+               goto error2;
+
+       rc = minios_evtchn_bind_interdomain(dev->front_id, tevtchn,
+                       netback_tx_handler, dev, &dev->tevtchn);
+       if (rc)
+               goto error2;
+
+       minios_unmask_evtchn(dev->revtchn);
+       minios_unmask_evtchn(dev->tevtchn);
+       minios_notify_remote_via_evtchn(dev->revtchn);
+       minios_notify_remote_via_evtchn(dev->tevtchn);
+    }
 
     bmk_snprintf(path, sizeof(path), "%s/state", dev->nodename);
     err = xenbus_switch_state(XBT_NIL, path, XenbusStateConnected);
@@ -1220,7 +1313,7 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
 
     rmb();
     if (notify)
-        minios_notify_remote_via_evtchn(dev->evtchn);
+        minios_notify_remote_via_evtchn(dev->revtchn);
 
     bmk_platform_splhigh();
     spin_lock(&netback_lock);
