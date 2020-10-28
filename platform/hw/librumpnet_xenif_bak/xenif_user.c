@@ -247,6 +247,8 @@ static int probe_netback_device(const char *vifpath) {
     char *msg;
     char *devpath, path[40];
 
+    XENPRINTF(("%s\n", __func__));
+
     /* give us a rump kernel context */
     rumpuser__hyp.hyp_schedule();
     rumpuser__hyp.hyp_lwproc_newlwp(0);
@@ -301,6 +303,8 @@ static void backend_thread_func(void *ign) {
     char vif_found;
     int err;
 
+    XENPRINTF(("%s\n", __func__));
+
     for (;;) {
         xenbus_wait_for_watch(&be_watch);
 
@@ -351,6 +355,8 @@ int VIFHYPER_SET_WATCH(void) {
     char path[64];
     int dom, nlocks;
 
+    XENPRINTF(("%s\n", __func__));
+
     rumpkern_unsched(&nlocks, NULL);
     xenbus_event_queue_init(&be_watch);
     bmk_snprintf(path, sizeof(path), "domid");
@@ -374,6 +380,9 @@ int VIFHYPER_SET_WATCH(void) {
 
 static void soft_start_thread_func(void *_viu) {
     struct virtif_user *viu = (struct virtif_user *)_viu;
+    //int i;
+
+    XENPRINTF(("%s\n", __func__));
 
     /* give us a rump kernel context */
     rumpuser__hyp.hyp_schedule();
@@ -391,9 +400,10 @@ static void soft_start_thread_func(void *_viu) {
             rumpuser__hyp.hyp_schedule();
             rump_virtif_soft_start(viu->viu_ifp);
             rumpuser__hyp.hyp_unschedule();
-            /* do not monopolize the CPU */
+            /* do not monopolize the CPU */ 
             if (++counter == 1000) {
-                bmk_sched_yield();
+		//for(i = 0; i < 12000; i++)
+                	bmk_sched_yield();
                 counter = 0;
             }
         } while (__atomic_exchange_n(
@@ -403,6 +413,9 @@ static void soft_start_thread_func(void *_viu) {
 }
 
 int VIFHYPER_SET_START(struct virtif_user *viu, void *ifp) {
+
+    XENPRINTF(("%s\n", __func__));
+
     viu->viu_ifp = ifp;
     viu->viu_softsthr = bmk_sched_create("soft_start", NULL, 0, -1,
                                          soft_start_thread_func, viu, NULL, 0);
@@ -410,6 +423,9 @@ int VIFHYPER_SET_START(struct virtif_user *viu, void *ifp) {
 }
 
 int VIFHYPER_WAKE(struct virtif_user *viu) {
+
+    XENPRINTF(("%s\n", __func__));
+
     if (__atomic_exchange_n(&viu->viu_softsblk.status, THREADBLK_STATUS_NOTIFY,
                             __ATOMIC_ACQ_REL) == THREADBLK_STATUS_SLEEP) {
         bmk_sched_wake(viu->viu_softsthr);
@@ -447,6 +463,8 @@ int VIFHYPER_CREATE(char *path, struct virtif_sc *vif_sc, uint8_t *enaddr,
     struct virtif_user *viu = NULL;
     int rv, nlocks;
 
+    XENPRINTF(("%s\n", __func__));
+
     rumpkern_unsched(&nlocks, NULL);
 
     viu = bmk_memalloc(sizeof(*viu), 0, BMK_MEMWHO_RUMPKERN);
@@ -483,6 +501,8 @@ void VIFHYPER_SEND(struct virtif_user *viu, struct rump_iovec *iov,
     int csum_blank[LB_SH];
     size_t i = 0;
 
+    XENPRINTF(("%s\n", __func__));
+
     for (i = 0; i < iovlen; i++) {
         if (netback_prepare_xmit(viu->viu_dev, iov[i].iov_base, iov[i].iov_len,
                                  iov[i].iov_offset, i) == -1) {
@@ -496,27 +516,43 @@ void VIFHYPER_SEND(struct virtif_user *viu, struct rump_iovec *iov,
 }
 
 void VIFHYPER_RING_STATUS(struct virtif_user *viu, int *is_full) {
+    XENPRINTF(("%s\n", __func__));
+
     *is_full = netback_rxring_full(viu->viu_dev);
 }
 
 void VIFHYPER_DYING(struct virtif_user *viu) {
+    int nlocks;
+
+    XENPRINTF(("%s\n", __func__));
+
+    rumpkern_unsched(&nlocks, NULL);
     __atomic_store_n(&viu->viu_dying, 1, __ATOMIC_RELEASE);
     if (__atomic_exchange_n(&viu->viu_rcvrblk.status, THREADBLK_STATUS_NOTIFY,
                             __ATOMIC_ACQ_REL) == THREADBLK_STATUS_SLEEP) {
     }
+    rumpkern_sched(nlocks, NULL);
 }
 
 void VIFHYPER_DESTROY(struct virtif_user *viu) {
+    int nlocks;
+
+    XENPRINTF(("%s\n", __func__));
+
+    rumpkern_unsched(&nlocks, NULL);
     XENBUS_BUG_ON(viu->viu_dying != 1);
 
     netback_shutdown(viu->viu_dev);
     bmk_memfree(viu, BMK_MEMWHO_RUMPKERN);
+    rumpkern_sched(nlocks, NULL);
 }
 
 static void netback_tx_response(struct netback_dev *dev, int id, int status) {
     RING_IDX resp_prod;
     struct netif_tx_response *txresp;
     int do_event;
+
+    XENPRINTF(("%s\n", __func__));
 
     resp_prod = dev->tx.rsp_prod_pvt;
     txresp = RING_GET_RESPONSE(&dev->tx, resp_prod);
@@ -542,6 +578,8 @@ static void network_tx(struct netback_dev *dev) {
     struct iovec iov[MAP_BATCH];
 
     struct virtif_user *viu = netback_get_private(dev);
+
+    XENPRINTF(("%s\n", __func__));
 
     req_cons = dev->tx.req_cons;
     rmb();
@@ -704,6 +742,8 @@ static void network_rx_buf_gc(struct netback_dev *dev) {
     RING_IDX cons, prod;
     unsigned short id;
 
+    XENPRINTF(("%s\n", __func__));
+
     do {
         prod = dev->rx.sring->req_prod;
         rmb(); /* Ensure we see responses up to 'rp'. */
@@ -784,6 +824,8 @@ xennet_thread(void *arg)
 {
 	struct netback_dev *dev = arg;
 
+        XENPRINTF(("%s\n", __func__));
+
 	/* give us a rump kernel context */
     	rumpuser__hyp.hyp_schedule();
     	rumpuser__hyp.hyp_lwproc_newlwp(0);
@@ -857,6 +899,8 @@ xennet_thread(void *arg)
 static void free_netback(struct netback_dev *dev) {
     unsigned int i;
 
+    XENPRINTF(("%s\n", __func__));
+
     for (i = 0; i < NET_TX_RING_SIZE; i++)
         down(&dev->rx_sem);
 
@@ -893,6 +937,8 @@ netback_init(char *_nodename,
     struct netif_rx_sring *rxs = NULL;
     struct netback_dev *dev;
     uint8_t split_channel = 0;
+
+    XENPRINTF(("%s\n", __func__));
 
     dev = bmk_memcalloc(1, sizeof(*dev), BMK_MEMWHO_WIREDBMK);
     bmk_snprintf(path, sizeof(path), "domid");
@@ -1174,6 +1220,8 @@ static void netback_shutdown(struct netback_dev *dev) {
     char nodename[256];
     int len;
 
+    XENPRINTF(("%s\n", __func__));
+
     bmk_printf("close network: backend at %s\n", dev->frontend);
 
     len = bmk_strlen(dev->frontend) + 1 + 5 + 1;
@@ -1240,6 +1288,8 @@ static int netback_prepare_xmit(struct netback_dev *dev, unsigned char *data, un
     int id;
     struct net_buffer *buf;
 
+    XENPRINTF(("%s\n", __func__));
+
     if (len > PAGE_SIZE)
         bmk_platform_halt("len > PAGE_SIZE\n");
 
@@ -1280,6 +1330,8 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
     netif_rx_response_t *rxresp;
     RING_IDX rsp_prod;
     int i, notify;
+
+    XENPRINTF(("%s\n", __func__));
 
     rmb();
     rsp_prod = dev->rx.rsp_prod_pvt;
@@ -1323,7 +1375,9 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
 }
 
 static int netback_rxring_full(struct netback_dev *dev) {
-    return RING_HAS_UNCONSUMED_REQUESTS(&dev->rx);
+   XENPRINTF(("%s\n", __func__));
+
+   return RING_HAS_UNCONSUMED_REQUESTS(&dev->rx);
 }
 
 static void *netback_get_private(struct netback_dev *dev) { return dev->netback_priv; }

@@ -298,6 +298,7 @@ void rump_virtif_soft_start(struct ifnet *ifp) {
 }
 
 static void virtif_start(struct ifnet *ifp) {
+	//rump_virtif_soft_start(ifp);
     struct virtif_sc *sc = ifp->if_softc;
     VIFHYPER_WAKE(sc->sc_viu);
 }
