@@ -70,9 +70,8 @@ DECLARE_WAIT_QUEUE_HEAD(netback_queue);
 #define NET_TX_RING_SIZE __CONST_RING_SIZE(netif_tx, PAGE_SIZE)
 #define NET_RX_RING_SIZE __CONST_RING_SIZE(netif_rx, PAGE_SIZE)
 
+#define TX_BATCH 32
 #define GRANT_INVALID_REF 0
-#define LB_SH 64
-
 #define get_gfn(x) (PFN_DOWN((uint64_t)(x)))
 
 /* The order of these values is important */
@@ -98,6 +97,7 @@ struct netback_dev {
     uint32_t handle;
 
     struct Queue *rx_list;
+    struct Queue *tx_list;
     struct semaphore rx_sem;
 
     struct net_buffer rx_buffers[NET_RX_RING_SIZE];
@@ -165,11 +165,11 @@ struct virtif_user {
 
 static struct xenbus_event_queue be_watch;
 static struct bmk_thread *backend_thread;
-gnttab_copy_t gop[LB_SH];
-unsigned short rsp_id[LB_SH];
+gnttab_copy_t rx_gop[NET_TX_RING_SIZE];
+gnttab_copy_t tx_gop[NET_TX_RING_SIZE];
+unsigned short rsp_id[NET_TX_RING_SIZE];
 static spinlock_t netback_lock = SPIN_LOCK_UNLOCKED;
 
-//static void init_rx_buffers(struct netback_dev *dev);
 static void network_tx(struct netback_dev *dev);
 static void network_rx_buf_gc(struct netback_dev *dev);
 static void netback_handler(evtchn_port_t port, struct pt_regs *regs,
@@ -205,7 +205,7 @@ static inline struct Queue *create_queue(unsigned capacity) {
     queue->capacity = capacity;
     queue->front = queue->size = 0;
     queue->rear = capacity - 1;
-    queue->array = (int *)bmk_memalloc(1, queue->capacity * sizeof(int),
+    queue->array = (int *)bmk_memalloc(1, queue->capacity * sizeof(long),
                                        BMK_MEMWHO_WIREDBMK);
 
     return queue;
@@ -217,20 +217,24 @@ static inline int is_full(struct Queue *queue) {
 
 static inline int is_empty(struct Queue *queue) { return (queue->size == 0); }
 
-static inline void add_id_to_list(int item, struct Queue *queue) {
-    if (is_full(queue))
-        return;
+static inline void add_to_list(long item, struct Queue *queue) {
+    if (is_full(queue)) 
+	    return;
+
     queue->rear = (queue->rear + 1) % queue->capacity;
     queue->array[queue->rear] = item;
     queue->size = queue->size + 1;
 }
 
-static inline int get_id_from_list(struct Queue *queue) {
+static inline long get_from_list(struct Queue *queue) {
     if (is_empty(queue))
-        return -1;
+	    return -1;
+
     int item = queue->array[queue->front];
     queue->front = (queue->front + 1) % queue->capacity;
     queue->size = queue->size - 1;
+
+    bmk_assert(item != -1);
 
     return item;
 }
@@ -238,7 +242,6 @@ static inline int get_id_from_list(struct Queue *queue) {
 static inline void destroy_queue(struct Queue *queue) {
     bmk_memfree(queue, BMK_MEMWHO_WIREDBMK);
 }
-
 
 static int probe_netback_device(const char *vifpath) {
     int err, i, pos, msize;
@@ -380,7 +383,6 @@ int VIFHYPER_SET_WATCH(void) {
 
 static void soft_start_thread_func(void *_viu) {
     struct virtif_user *viu = (struct virtif_user *)_viu;
-    //int i;
 
     XENPRINTF(("%s\n", __func__));
 
@@ -402,7 +404,6 @@ static void soft_start_thread_func(void *_viu) {
             rumpuser__hyp.hyp_unschedule();
             /* do not monopolize the CPU */ 
             if (++counter == 1000) {
-		//for(i = 0; i < 12000; i++)
                 	bmk_sched_yield();
                 counter = 0;
             }
@@ -433,30 +434,6 @@ int VIFHYPER_WAKE(struct virtif_user *viu) {
 
     return 0;
 }
-#if 0
-/*
- * Ok, based on how (the unmodified) netback works, we need to
- * consume the data here.  So store it locally (and revisit some day).
- */
-static void myrecv(struct netback_dev *dev, unsigned char *data, int dlen,
-                   unsigned char csum_blank) {
-    struct virtif_user *viu = netback_get_private(dev);
-
-    if (dlen > MAXPKT) {
-        bmk_printf("myrecv: pkt len %d too big\n", dlen);
-        return;
-    }
-
-    struct iovec iov;
-
-    iov.iov_base = data;
-    iov.iov_len = dlen;
-
-    rumpuser__hyp.hyp_schedule();
-    rump_virtif_pktdeliver(viu->viu_vifsc, &iov, 1, csum_blank);
-    rumpuser__hyp.hyp_unschedule();
-}
-#endif
 
 int VIFHYPER_CREATE(char *path, struct virtif_sc *vif_sc, uint8_t *enaddr,
                     struct virtif_user **viup, int8_t *vifname) {
@@ -498,7 +475,7 @@ out:
 
 void VIFHYPER_SEND(struct virtif_user *viu, struct rump_iovec *iov,
                    size_t iovlen) {
-    int csum_blank[LB_SH];
+    int csum_blank[NET_TX_RING_SIZE];
     size_t i = 0;
 
     XENPRINTF(("%s\n", __func__));
@@ -568,14 +545,18 @@ static void netback_tx_response(struct netback_dev *dev, int id, int status) {
 }
 
 static void network_tx(struct netback_dev *dev) {
-    netif_tx_request_t txreqs[MAP_BATCH];
+    netif_tx_request_t txreqs[TX_BATCH];
     RING_IDX req_cons;
-    void *pages[MAP_BATCH];
-    uint32_t grefs[MAP_BATCH];
+    void *pages[TX_BATCH];
+    void *map_pages[TX_BATCH];
+    uint32_t grefs[TX_BATCH];
     uint32_t id = (uint32_t)dev->front_id;
     int i = 0, j, receive_pending;
-    uint8_t csum_blank;
-    struct iovec iov[MAP_BATCH];
+    uint8_t csum_blank[TX_BATCH];
+    struct iovec iov[TX_BATCH];
+    long addr;
+    int map_count = 0;
+    int copy_count = 0;
 
     struct virtif_user *viu = netback_get_private(dev);
 
@@ -584,159 +565,131 @@ static void network_tx(struct netback_dev *dev) {
     req_cons = dev->tx.req_cons;
     rmb();
 
+label:
+    i = map_count = copy_count = 0;
+
     while (1) {
-        rmb(); /* be sure to read the request before updating */
+    	rmb(); /* be sure to read the request before updating */
         dev->tx.req_cons = req_cons;
         wmb();
-        RING_FINAL_CHECK_FOR_REQUESTS(&dev->tx, receive_pending);
+	receive_pending = RING_HAS_UNCONSUMED_REQUESTS(&dev->tx);
         if (receive_pending == 0) {
             break;
         }
+	receive_pending--;
 
-        RING_COPY_REQUEST(&dev->tx, req_cons, &txreqs[i]);
         rmb();
+        RING_COPY_REQUEST(&dev->tx, req_cons, &txreqs[i]);
         req_cons++;
 
-        grefs[i] = txreqs[i].gref;
-	i++;
-#if 0
-        if (++i == MAP_BATCH) {
-            if (gntmap_map_grant_refs_n(&dev->map_entry, i, &id, 0, grefs, 0,
-                                        pages) != 0) {
-                bmk_printf("page == NULL\n");
-                for (j = 0; j < i; j++)
-                    netback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
-                return;
-            }
+	addr = get_from_list(dev->tx_list);
+	if(addr == -1)
+		pages[i] = bmk_pgalloc_align(0, BMK_PCPU_PAGE_SIZE);
+	else 
+		pages[i] = (void*)addr;
 
-            for (j = 0; j < i; j++) {
-                if ((txreqs[j].flags & NETTXF_csum_blank) != 0)
-                    csum_blank = 1;
-                else
-                    csum_blank = 0;
+	if(pages[i] == NULL) {
+		bmk_printf("%s: Cannot allocate memory\n", __func__);
+		bmk_platform_halt(NULL);
+    	}
 
-		iov[j].iov_base = (unsigned char *)pages[j] + txreqs[j].offset;
-		iov[j].iov_len = txreqs[j].size;
-	    }
+	if ((txreqs[i].size > 128) && 0) {
+		grefs[map_count] = txreqs[i].gref;
+		map_count++;
+	}
+	else {
+		bmk_assert((txreqs[i].size + txreqs[i].offset) < PAGE_SIZE);
 
-    	    rumpuser__hyp.hyp_schedule();
-	    rump_virtif_pktdeliver(viu->viu_vifsc, iov, i, csum_blank);
-	    rumpuser__hyp.hyp_unschedule();
-	
-	    
-            if (gntmap_munmap_n(&dev->map_entry, (unsigned long *)pages, i) !=
-                0)
-                bmk_printf("UNMAPED FAILED\n");
+		tx_gop[copy_count].source.u.ref = txreqs[i].gref;
+		tx_gop[copy_count].source.domid = dev->front_id; 
+		tx_gop[copy_count].source.offset = txreqs[i].offset;
+		tx_gop[copy_count].dest.u.gmfn = get_gfn(pages[i]);
+		tx_gop[copy_count].dest.domid = DOMID_SELF;
+		tx_gop[copy_count].dest.offset = 0;
+		tx_gop[copy_count].len = txreqs[i].size;
+		tx_gop[copy_count].flags = GNTCOPY_source_gref;
 
-            for (j = 0; j < i; j++)
-                netback_tx_response(dev, txreqs[j].id, NETIF_RSP_OKAY);
-            i = 0;
-        }
-#endif
-    }
-
-    if (i != 0) {
-	//bmk_printf("i = %d\n", i);
-        if (gntmap_map_grant_refs_n(&dev->map_entry, i, &id, 0, grefs, 0,
-                                    pages) != 0) {
-            bmk_printf("page == NULL\n");
-            for (j = 0; j < i; j++)
-                netback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
-            return;
-        }
-
-        for (j = 0; j < i; j++) {
-            if ((txreqs[j].flags & NETTXF_csum_blank) != 0)
-                csum_blank = 1;
-            else
-                csum_blank = 0;
-
-	    iov[j].iov_base = (unsigned char *)pages[j] + txreqs[j].offset;
-	    iov[j].iov_len = txreqs[j].size;
-
-	    rumpuser__hyp.hyp_schedule();
-	    rump_virtif_pktdeliver(viu->viu_vifsc, &iov[j], 1, csum_blank);
-	    rumpuser__hyp.hyp_unschedule();
-
-
-	   // bmk_printf("base = %p len = %ld\n", iov[j].iov_base, iov[j].iov_len);
-	    
+		iov[i].iov_base = (unsigned char *)pages[i];
+		copy_count++;
 	}
 
-        if (gntmap_munmap_n(&dev->map_entry, (unsigned long *)pages, i) != 0)
-            bmk_printf("UNMAPED FAILED\n");
+	iov[i].iov_len = txreqs[i].size;
+	if ((txreqs[i].flags & NETTXF_csum_blank) != 0)
+		csum_blank[i] = 1;
+	else
+                csum_blank[i] = 0;
 
-        for (j = 0; j < i; j++)
-            netback_tx_response(dev, txreqs[j].id, NETIF_RSP_OKAY);
+    	rmb(); /* be sure to read the request before updating pointer */
+	dev->tx.req_cons = req_cons;
+	wmb();
+
+	if (++i >= TX_BATCH)
+		break;
+    }
+
+    /* Do copy for tx_size smaller than 128*/
+    if (copy_count != 0) {
+	if (HYPERVISOR_grant_table_op(GNTTABOP_copy, &tx_gop, copy_count) != 0) {
+        	bmk_printf("TX GNTTABOP_copy failed\n");
+    	}
+
+        for (j = 0; j < copy_count; j++) {
+    	    if (tx_gop[j].status != GNTST_okay) {
+		    bmk_printf("TX GOP Status = %d, id = %d\n", tx_gop[j].status, j);
+		    netback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
+	    }
+	}
+    }
+    
+    /* Do map for tx_size of 128 or bigger, and construct iov*/
+    if (map_count != 0) {
+	    if (gntmap_map_grant_refs_n(&dev->map_entry, map_count, &id, 0,
+				    grefs, 0, map_pages) != 0) {
+		    bmk_printf("TX GNTTABOP_map failed\n");
+		    for (j = 0; j < map_count; j++)
+			netback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
+		    return;
+	    }
+	    else {
+		    for (j = 0; j < i; j++) {
+			if (txreqs[j].size > 128) {
+				bmk_memcpy(pages[j], (unsigned char *)map_pages[j]
+						+ txreqs[j].offset, txreqs[j].size);
+		    		iov[j].iov_base = (unsigned char *)pages[j];
+			}
+		    }
+	    }
+	
+	    /* unmap map grefs */
+	    if (gntmap_munmap_n(&dev->map_entry, (unsigned long *)map_pages, map_count) != 0)
+		    bmk_printf("UNMAPED FAILED\n");
+    }
+
+    /* submit all iovs */
+    for (j = 0; j < i; j++) {
+	rumpuser__hyp.hyp_schedule();
+	rump_virtif_pktdeliver(viu->viu_vifsc, &iov[j], 1, csum_blank[j]);
+	rumpuser__hyp.hyp_unschedule();
+    }
+   
+    /* sending response just after ecah corresponding pktdeliver reduces
+     * performance. Therefore, we first do all pktdeliver and then send responses. 
+     */
+    for (j = 0; j < i; j++) {
+	netback_tx_response(dev, txreqs[j].id, NETIF_RSP_OKAY);
+    	add_to_list((long)pages[j], dev->tx_list);
     }
 
     rmb(); /* be sure to read the request before updating pointer */
     dev->tx.req_cons = req_cons;
     wmb();
+
+    network_rx_buf_gc(dev); 
+
+    RING_FINAL_CHECK_FOR_REQUESTS(&dev->tx, receive_pending);
+    if (receive_pending != 0)
+	    goto label;
 }
-
-#if 0
-static void network_tx(struct netback_dev *dev) {
-    netif_tx_request_t txreqs;
-    RING_IDX req_cons;
-    void *pages;
-    uint32_t grefs;
-    uint32_t id = (uint32_t)dev->front_id;
-    int receive_pending;
-    uint8_t csum_blank;
-    struct iovec iov;
-
-    struct virtif_user *viu = netback_get_private(dev);
-
-    req_cons = dev->tx.req_cons;
-    rmb();
-
-    while (1) {
-        rmb(); /* be sure to read the request before updating */
-        dev->tx.req_cons = req_cons;
-        wmb();
-        RING_FINAL_CHECK_FOR_REQUESTS(&dev->tx, receive_pending);
-        if (receive_pending == 0) {
-            break;
-        }
-
-        RING_COPY_REQUEST(&dev->tx, req_cons, &txreqs);
-        rmb();
-        req_cons++;
-
-        grefs = txreqs.gref;
-
-        pages = gntmap_map_grant_refs(&dev->map_entry, 1, &id, 0, &grefs, 0);
-
-       	if (pages == NULL){
-            bmk_printf("page == NULL\n");
-            netback_tx_response(dev, txreqs.id, NETIF_RSP_DROPPED);
-            return;
-        }
-
-        if ((txreqs.flags & NETTXF_csum_blank) != 0)
-                csum_blank = 1;
-        else
-                csum_blank = 0;
-
-	iov.iov_base = (unsigned char *)pages + txreqs.offset;
-	iov.iov_len = txreqs.size;
-	    
-	//rumpuser__hyp.hyp_schedule();
-	rump_virtif_pktdeliver(viu->viu_vifsc, &iov, 1, csum_blank);
-	//rumpuser__hyp.hyp_unschedule();
-
-        if (gntmap_munmap(&dev->map_entry, (unsigned long)pages, 1) != 0)
-            bmk_printf("UNMAPED FAILED\n");
-
-        netback_tx_response(dev, txreqs.id, NETIF_RSP_OKAY);
-    }
-
-    rmb(); /* be sure to read the request before updating pointer */
-    dev->tx.req_cons = req_cons;
-    wmb();
-}
-#endif
 
 static void network_rx_buf_gc(struct netback_dev *dev) {
     RING_IDX cons, prod;
@@ -760,7 +713,7 @@ static void network_rx_buf_gc(struct netback_dev *dev) {
             buf = &dev->rx_buffers[id];
             buf->gref = rxreq.gref;
 
-            add_id_to_list(id, dev->rx_list);
+            add_to_list(id, dev->rx_list);
             up(&dev->rx_sem);
         }
 
@@ -824,8 +777,6 @@ xennet_thread(void *arg)
 {
 	struct netback_dev *dev = arg;
 
-        XENPRINTF(("%s\n", __func__));
-
 	/* give us a rump kernel context */
     	rumpuser__hyp.hyp_schedule();
     	rumpuser__hyp.hyp_lwproc_newlwp(0);
@@ -874,6 +825,7 @@ xennet_thread(void *arg)
 			break;
 		case RUN_RX:
 			XENPRINTF(("xbdback_thread: run: outside spinlock\n"));
+			bmk_printf("Network rx buf gc\n");
 			dev->xennet_status = WAITING; /* reset state */
 			spin_unlock(&dev->xennet_lock);
 			bmk_platform_splx(0);
@@ -964,6 +916,8 @@ netback_init(char *_nodename,
         /* TODO: that's a lot of memory */
         dev->rx_buffers[i].page = bmk_pgalloc_one();
     }
+
+    dev->tx_list = create_queue(NET_TX_RING_SIZE);
 
     bmk_snprintf(path, sizeof(path), "%s/frontend-id", dev->nodename);
     dev->front_id = xenbus_read_integer(path);
@@ -1290,22 +1244,20 @@ static int netback_prepare_xmit(struct netback_dev *dev, unsigned char *data, un
 
     XENPRINTF(("%s\n", __func__));
 
-    if (len > PAGE_SIZE)
-        bmk_platform_halt("len > PAGE_SIZE\n");
+    bmk_assert (len <= PAGE_SIZE);
 
     down(&dev->rx_sem);
 
-    if (index > LB_SH)
-        bmk_platform_halt("len > PAGE_SIZE\n");
+    bmk_assert (index < NET_TX_RING_SIZE);
 
-    gop[index].flags = GNTCOPY_dest_gref;
-    gop[index].source.offset = offset;
-    gop[index].source.domid = DOMID_SELF;
-    gop[index].source.u.gmfn = get_gfn(data);
+    rx_gop[index].flags = GNTCOPY_dest_gref;
+    rx_gop[index].source.offset = offset;
+    rx_gop[index].source.domid = DOMID_SELF;
+    rx_gop[index].source.u.gmfn = get_gfn(data);
 
     bmk_platform_splhigh();
     spin_lock(&netback_lock);
-    id = get_id_from_list(dev->rx_list);
+    id = get_from_list(dev->rx_list);
     spin_unlock(&netback_lock);
     bmk_platform_splx(0);
     if (id == -1) {
@@ -1318,10 +1270,10 @@ static int netback_prepare_xmit(struct netback_dev *dev, unsigned char *data, un
     rsp_id[index] = id;
     buf = &dev->rx_buffers[id];
 
-    gop[index].dest.u.ref = buf->gref;
-    gop[index].dest.offset = 0;
-    gop[index].len = len;
-    gop[index].dest.domid = dev->front_id;
+    rx_gop[index].dest.u.ref = buf->gref;
+    rx_gop[index].dest.offset = 0;
+    rx_gop[index].len = len;
+    rx_gop[index].dest.domid = dev->front_id;
 
     return 0;
 }
@@ -1336,7 +1288,7 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
     rmb();
     rsp_prod = dev->rx.rsp_prod_pvt;
 
-    if (HYPERVISOR_grant_table_op(GNTTABOP_copy, &gop, count) != 0) {
+    if (HYPERVISOR_grant_table_op(GNTTABOP_copy, &rx_gop, count) != 0) {
         bmk_printf("GNTTABOP_copy failed\n");
     }
 
@@ -1345,15 +1297,15 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
         rsp_prod++;
         rxresp->id = rsp_id[i];
         rxresp->offset = 0;
-        rxresp->status = gop[i].len;
+        rxresp->status = rx_gop[i].len;
 
         if (csum_blank[i] != 0)
             rxresp->flags = NETRXF_csum_blank;
         else
             rxresp->flags = 0;
 
-        if (gop[i].status != GNTST_okay) {
-            bmk_printf("GOP Status = %d, id = %d\n", gop[i].status, rsp_id[i]);
+        if (rx_gop[i].status != GNTST_okay) {
+            bmk_printf("GOP Status = %d, id = %d\n", rx_gop[i].status, rsp_id[i]);
             rxresp->status = NETIF_RSP_ERROR;
         }
     }
@@ -1369,7 +1321,7 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
 
     bmk_platform_splhigh();
     spin_lock(&netback_lock);
-    network_rx_buf_gc(dev);
+    network_rx_buf_gc(dev); 
     spin_unlock(&netback_lock);
     bmk_platform_splx(0);
 }

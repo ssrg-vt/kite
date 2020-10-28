@@ -3,8 +3,7 @@
 
 #include <mini-os/os.h>
 
-#define MAP_BATCH 128 
-
+#define MAP_BATCH 128
 /*
  * Please consider struct gntmap opaque. If instead you choose to disregard
  * this message, I insist that you keep an eye out for raptors.

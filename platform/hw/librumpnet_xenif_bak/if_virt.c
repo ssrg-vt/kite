@@ -298,7 +298,6 @@ void rump_virtif_soft_start(struct ifnet *ifp) {
 }
 
 static void virtif_start(struct ifnet *ifp) {
-	//rump_virtif_soft_start(ifp);
     struct virtif_sc *sc = ifp->if_softc;
     VIFHYPER_WAKE(sc->sc_viu);
 }
@@ -314,7 +313,7 @@ void rump_virtif_pktdeliver(struct virtif_sc *sc, struct iovec *iov,
     struct ifnet *ifp = &sc->sc_ec.ec_if;
     struct mbuf *m;
     size_t i;
-    int off;//, olen;
+    int off;
 
     if ((ifp->if_flags & IFF_RUNNING) == 0)
         return;
@@ -327,18 +326,16 @@ void rump_virtif_pktdeliver(struct virtif_sc *sc, struct iovec *iov,
     m->m_len = m->m_pkthdr.len = 0;
 
     for (i = 0, off = 0; i < iovlen; i++) {
-        //olen = m->m_pkthdr.len;
         m_copyback(m, off, iov[i].iov_len, iov[i].iov_base);
-	
-	//aprint_normal("offset=%d iov_len=%ld pkt.len =%d\n", 
-	//		off, iov[i].iov_len, m->m_pkthdr.len);
-        off += iov[i].iov_len;
+
+	off += iov[i].iov_len;
         if (off != m->m_pkthdr.len) {
             aprint_verbose_ifnet(ifp, "m_copyback failed\n");
             m_freem(m);
             return;
         }
     }
+
     if (csum_blank == 1) {
         xennet_checksum_fill(&m);
         if (m == NULL) {
