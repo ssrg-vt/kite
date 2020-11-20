@@ -1,6 +1,6 @@
 .include <bsd.own.mk>
 
-LIB=	rumpnet_xenif_bak
+LIB=	rumpxen_netback
 
 SRCS=	if_virt.c
 SRCS+=	xenif_component.c
@@ -8,7 +8,7 @@ SRCS+=  xennet_checksum.c
 
 RUMPTOP= ${TOPRUMP}
 
-IFBASE=		-DVIRTIF_BASE=xenif_bak
+IFBASE=		-DVIRTIF_BASE=xen_netback
 
 CPPFLAGS+=	-I${RUMPTOP}/librump/rumpkern -I${RUMPTOP}/librump/rumpnet
 CPPFLAGS+=	-I${.CURDIR}

@@ -41,7 +41,7 @@ struct if_clone;
 struct ifnet;
 struct virtif_sc;
 int rump_virtif_clone(char *);
-void rump_virtif_pktdeliver(struct virtif_sc *, struct iovec *, size_t,
+void rump_virtif_pktenque(struct virtif_sc *, struct iovec *, size_t,
                             unsigned char);
 int virtif_entry(struct if_clone *ifc, int num);
 void rump_virtif_soft_start(struct ifnet *);

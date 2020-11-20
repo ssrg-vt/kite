@@ -308,7 +308,7 @@ static void virtif_stop(struct ifnet *ifp, int disable) {
     ifp->if_flags &= ~IFF_RUNNING;
 }
 
-void rump_virtif_pktdeliver(struct virtif_sc *sc, struct iovec *iov,
+void rump_virtif_pktenque(struct virtif_sc *sc, struct iovec *iov,
                             size_t iovlen, unsigned char csum_blank) {
     struct ifnet *ifp = &sc->sc_ec.ec_if;
     struct mbuf *m;

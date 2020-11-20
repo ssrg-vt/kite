@@ -63,7 +63,7 @@ struct iovec {
 #define XENPRINTF(x) bmk_printf x
 #endif
 
-DECLARE_WAIT_QUEUE_HEAD(netback_queue);
+DECLARE_WAIT_QUEUE_HEAD(xennetback_queue);
 
 #define memset(a, b, c) bmk_memset(a, b, c)
 
@@ -91,7 +91,7 @@ struct net_buffer {
     grant_ref_t gref;
 };
 
-struct netback_dev {
+struct xennetback_dev {
     domid_t back_id;
     domid_t front_id;
     uint32_t handle;
@@ -121,7 +121,7 @@ struct netback_dev {
 
     struct xenbus_event_queue events;
 
-    void *netback_priv;
+    void *xennetback_priv;
     struct gntmap map_entry;
 
     spinlock_t xennet_lock;
@@ -154,7 +154,7 @@ struct virtif_user {
     struct bmk_thread *viu_rcvrthr;
     struct bmk_thread *viu_softsthr;
     void *viu_ifp;
-    struct netback_dev *viu_dev;
+    struct xennetback_dev *viu_dev;
     struct virtif_sc *viu_vifsc;
 
     int viu_read;
@@ -168,22 +168,22 @@ static struct bmk_thread *backend_thread;
 gnttab_copy_t rx_gop[NET_TX_RING_SIZE];
 gnttab_copy_t tx_gop[NET_TX_RING_SIZE];
 unsigned short rsp_id[NET_TX_RING_SIZE];
-static spinlock_t netback_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t xennetback_lock = SPIN_LOCK_UNLOCKED;
 
-static void network_tx(struct netback_dev *dev);
-static void network_rx_buf_gc(struct netback_dev *dev);
-static void netback_handler(evtchn_port_t port, struct pt_regs *regs,
+static void network_tx(struct xennetback_dev *dev);
+static void network_rx_buf_gc(struct xennetback_dev *dev);
+static void xennetback_handler(evtchn_port_t port, struct pt_regs *regs,
                             void *data);
 
-static struct netback_dev *netback_init(char *nodename, unsigned char rawmac[6], char **ip, void *priv, char* vifname);
-static int netback_prepare_xmit(struct netback_dev *dev, unsigned char* data, unsigned int len, int offset, unsigned int index);
-static void netback_xmit(struct netback_dev *dev, int* csum_blank, int count); 
-static int netback_rxring_full(struct netback_dev *dev); 
-static void netback_shutdown(struct netback_dev *dev);
+static struct xennetback_dev *xennetback_init(char *nodename, unsigned char rawmac[6], char **ip, void *priv, char* vifname);
+static int xennetback_prepare_xmit(struct xennetback_dev *dev, unsigned char* data, unsigned int len, int offset, unsigned int index);
+static void xennetback_xmit(struct xennetback_dev *dev, int* csum_blank, int count); 
+static int xennetback_rxring_full(struct xennetback_dev *dev); 
+static void xennetback_shutdown(struct xennetback_dev *dev);
 
-static void *netback_get_private(struct netback_dev *);
+static void *xennetback_get_private(struct xennetback_dev *);
 
-extern struct wait_queue_head netback_queue;
+extern struct wait_queue_head xennetback_queue;
 
 
 static void threadblk_callback(struct bmk_thread *prev,
@@ -243,7 +243,7 @@ static inline void destroy_queue(struct Queue *queue) {
     bmk_memfree(queue, BMK_MEMWHO_WIREDBMK);
 }
 
-static int probe_netback_device(const char *vifpath) {
+static int probe_xennetback_device(const char *vifpath) {
     int err, i, pos, msize;
     unsigned long state;
     char **dir;
@@ -340,7 +340,7 @@ static void backend_thread_func(void *ign) {
 
         for (id = 0; dirid[id]; id++) {
             bmk_snprintf(path, sizeof(path), "backend/vif/%s", dirid[id]);
-            err = probe_netback_device(path);
+            err = probe_xennetback_device(path);
             if (err)
                 break;
             bmk_memfree(dirid[id], BMK_MEMWHO_WIREDBMK);
@@ -456,7 +456,7 @@ int VIFHYPER_CREATE(char *path, struct virtif_sc *vif_sc, uint8_t *enaddr,
     viu->viu_softsblk.status = THREADBLK_STATUS_AWAKE;
     viu->viu_vifsc = vif_sc;
 
-    viu->viu_dev = netback_init(path, enaddr, NULL, viu, vifname);
+    viu->viu_dev = xennetback_init(path, enaddr, NULL, viu, vifname);
     if (!viu->viu_dev) {
         VIFHYPER_DYING(viu);
         bmk_memfree(viu, BMK_MEMWHO_RUMPKERN);
@@ -481,7 +481,7 @@ void VIFHYPER_SEND(struct virtif_user *viu, struct rump_iovec *iov,
     XENPRINTF(("%s\n", __func__));
 
     for (i = 0; i < iovlen; i++) {
-        if (netback_prepare_xmit(viu->viu_dev, iov[i].iov_base, iov[i].iov_len,
+        if (xennetback_prepare_xmit(viu->viu_dev, iov[i].iov_base, iov[i].iov_len,
                                  iov[i].iov_offset, i) == -1) {
             break;
         }
@@ -489,13 +489,13 @@ void VIFHYPER_SEND(struct virtif_user *viu, struct rump_iovec *iov,
         csum_blank[i] = iov[i].csum_blank;
     }
 
-    netback_xmit(viu->viu_dev, csum_blank, i);
+    xennetback_xmit(viu->viu_dev, csum_blank, i);
 }
 
 void VIFHYPER_RING_STATUS(struct virtif_user *viu, int *is_full) {
     XENPRINTF(("%s\n", __func__));
 
-    *is_full = netback_rxring_full(viu->viu_dev);
+    *is_full = xennetback_rxring_full(viu->viu_dev);
 }
 
 void VIFHYPER_DYING(struct virtif_user *viu) {
@@ -519,12 +519,12 @@ void VIFHYPER_DESTROY(struct virtif_user *viu) {
     rumpkern_unsched(&nlocks, NULL);
     XENBUS_BUG_ON(viu->viu_dying != 1);
 
-    netback_shutdown(viu->viu_dev);
+    xennetback_shutdown(viu->viu_dev);
     bmk_memfree(viu, BMK_MEMWHO_RUMPKERN);
     rumpkern_sched(nlocks, NULL);
 }
 
-static void netback_tx_response(struct netback_dev *dev, int id, int status) {
+static void xennetback_tx_response(struct xennetback_dev *dev, int id, int status) {
     RING_IDX resp_prod;
     struct netif_tx_response *txresp;
     int do_event;
@@ -544,7 +544,7 @@ static void netback_tx_response(struct netback_dev *dev, int id, int status) {
     }
 }
 
-static void network_tx(struct netback_dev *dev) {
+static void network_tx(struct xennetback_dev *dev) {
     netif_tx_request_t txreqs[TX_BATCH];
     RING_IDX req_cons;
     void *pages[TX_BATCH];
@@ -558,7 +558,7 @@ static void network_tx(struct netback_dev *dev) {
     int map_count = 0;
     int copy_count = 0;
 
-    struct virtif_user *viu = netback_get_private(dev);
+    struct virtif_user *viu = xennetback_get_private(dev);
 
     XENPRINTF(("%s\n", __func__));
 
@@ -636,7 +636,7 @@ label:
         for (j = 0; j < copy_count; j++) {
     	    if (tx_gop[j].status != GNTST_okay) {
 		    bmk_printf("TX GOP Status = %d, id = %d\n", tx_gop[j].status, j);
-		    netback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
+		    xennetback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
 	    }
 	}
     }
@@ -647,7 +647,7 @@ label:
 				    grefs, 0, map_pages) != 0) {
 		    bmk_printf("TX GNTTABOP_map failed\n");
 		    for (j = 0; j < map_count; j++)
-			netback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
+			xennetback_tx_response(dev, txreqs[j].id, NETIF_RSP_DROPPED);
 		    return;
 	    }
 	    else {
@@ -668,7 +668,7 @@ label:
     /* submit all iovs */
     for (j = 0; j < i; j++) {
 	rumpuser__hyp.hyp_schedule();
-	rump_virtif_pktdeliver(viu->viu_vifsc, &iov[j], 1, csum_blank[j]);
+	rump_virtif_pktenque(viu->viu_vifsc, &iov[j], 1, csum_blank[j]);
 	rumpuser__hyp.hyp_unschedule();
     }
    
@@ -676,7 +676,7 @@ label:
      * performance. Therefore, we first do all pktdeliver and then send responses. 
      */
     for (j = 0; j < i; j++) {
-	netback_tx_response(dev, txreqs[j].id, NETIF_RSP_OKAY);
+	xennetback_tx_response(dev, txreqs[j].id, NETIF_RSP_OKAY);
     	add_to_list((long)pages[j], dev->tx_list);
     }
 
@@ -691,7 +691,7 @@ label:
 	    goto label;
 }
 
-static void network_rx_buf_gc(struct netback_dev *dev) {
+static void network_rx_buf_gc(struct xennetback_dev *dev) {
     RING_IDX cons, prod;
     unsigned short id;
 
@@ -730,9 +730,9 @@ static void xennet_sched_wake(struct threadblk *tblk, struct bmk_thread *thread)
 	}
 }
 
-static void netback_handler(evtchn_port_t port, struct pt_regs *regs,
+static void xennetback_handler(evtchn_port_t port, struct pt_regs *regs,
                             void *data) {
-	struct netback_dev *dev = data;
+	struct xennetback_dev *dev = data;
 	bmk_platform_splhigh();
 	spin_lock(&dev->xennet_lock);
 	/* only set RUN state when we are WAITING for work */
@@ -743,9 +743,9 @@ static void netback_handler(evtchn_port_t port, struct pt_regs *regs,
 	bmk_platform_splx(0);
 }
 
-static void netback_tx_handler(evtchn_port_t port, struct pt_regs *regs,
+static void xennetback_tx_handler(evtchn_port_t port, struct pt_regs *regs,
                             void *data) {
-	struct netback_dev *dev = data;
+	struct xennetback_dev *dev = data;
 	bmk_platform_splhigh();
 	spin_lock(&dev->xennet_lock);
 	/* only set RUN state when we are WAITING for work */
@@ -756,9 +756,9 @@ static void netback_tx_handler(evtchn_port_t port, struct pt_regs *regs,
 	bmk_platform_splx(0);
 }
 
-static void netback_rx_handler(evtchn_port_t port, struct pt_regs *regs,
+static void xennetback_rx_handler(evtchn_port_t port, struct pt_regs *regs,
                             void *data) {
-	struct netback_dev *dev = data;
+	struct xennetback_dev *dev = data;
 	bmk_platform_splhigh();
 	spin_lock(&dev->xennet_lock);
 	/* only set RUN state when we are WAITING for work */
@@ -775,7 +775,7 @@ static void netback_rx_handler(evtchn_port_t port, struct pt_regs *regs,
 static void
 xennet_thread(void *arg)
 {
-	struct netback_dev *dev = arg;
+	struct xennetback_dev *dev = arg;
 
 	/* give us a rump kernel context */
     	rumpuser__hyp.hyp_schedule();
@@ -848,7 +848,7 @@ xennet_thread(void *arg)
 	}
 }
 
-static void free_netback(struct netback_dev *dev) {
+static void free_netback(struct xennetback_dev *dev) {
     unsigned int i;
 
     XENPRINTF(("%s\n", __func__));
@@ -876,8 +876,8 @@ static void free_netback(struct netback_dev *dev) {
     bmk_memfree(dev, BMK_MEMWHO_WIREDBMK);
 }
 
-static struct netback_dev *
-netback_init(char *_nodename,
+static struct xennetback_dev *
+xennetback_init(char *_nodename,
              unsigned char rawmac[6], char **ip, void *priv, char *vifname) {
     xenbus_transaction_t xbt;
     char *err, *message = NULL;
@@ -887,7 +887,7 @@ netback_init(char *_nodename,
     uint32_t id;
     struct netif_tx_sring *txs = NULL;
     struct netif_rx_sring *rxs = NULL;
-    struct netback_dev *dev;
+    struct xennetback_dev *dev;
     uint8_t split_channel = 0;
 
     XENPRINTF(("%s\n", __func__));
@@ -896,7 +896,7 @@ netback_init(char *_nodename,
     bmk_snprintf(path, sizeof(path), "domid");
     dev->back_id = xenbus_read_integer(path);
 
-    dev->netback_priv = priv;
+    dev->xennetback_priv = priv;
 
     if (!_nodename) {
         bmk_printf("No backend path found\n");
@@ -1118,7 +1118,7 @@ done:
     dev->xennet_thread_blk.status = THREADBLK_STATUS_AWAKE;
 
     if (split_channel == 0) {
-    	rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn, netback_handler,
+    	rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn, xennetback_handler,
                                         dev, &dev->evtchn);
     	if (rc)
         	goto error2;
@@ -1128,12 +1128,12 @@ done:
     	minios_notify_remote_via_evtchn(dev->evtchn);
     } else {
        rc = minios_evtchn_bind_interdomain(dev->front_id, revtchn,
-                       netback_rx_handler, dev, &dev->revtchn);
+                       xennetback_rx_handler, dev, &dev->revtchn);
        if (rc)
                goto error2;
 
        rc = minios_evtchn_bind_interdomain(dev->front_id, tevtchn,
-                       netback_tx_handler, dev, &dev->tevtchn);
+                       xennetback_tx_handler, dev, &dev->tevtchn);
        if (rc)
                goto error2;
 
@@ -1167,7 +1167,7 @@ error:
     return NULL;
 }
 
-static void netback_shutdown(struct netback_dev *dev) {
+static void xennetback_shutdown(struct xennetback_dev *dev) {
     char *err = NULL;
     XenbusState state;
     char path[256];
@@ -1237,7 +1237,7 @@ close:
         free_netback(dev);
 }
 
-static int netback_prepare_xmit(struct netback_dev *dev, unsigned char *data, unsigned int len,
+static int xennetback_prepare_xmit(struct xennetback_dev *dev, unsigned char *data, unsigned int len,
                          int offset, unsigned int index) {
     int id;
     struct net_buffer *buf;
@@ -1256,9 +1256,9 @@ static int netback_prepare_xmit(struct netback_dev *dev, unsigned char *data, un
     rx_gop[index].source.u.gmfn = get_gfn(data);
 
     bmk_platform_splhigh();
-    spin_lock(&netback_lock);
+    spin_lock(&xennetback_lock);
     id = get_from_list(dev->rx_list);
-    spin_unlock(&netback_lock);
+    spin_unlock(&xennetback_lock);
     bmk_platform_splx(0);
     if (id == -1) {
         return -1;
@@ -1278,7 +1278,7 @@ static int netback_prepare_xmit(struct netback_dev *dev, unsigned char *data, un
     return 0;
 }
 
-static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
+static void xennetback_xmit(struct xennetback_dev *dev, int *csum_blank, int count) {
     netif_rx_response_t *rxresp;
     RING_IDX rsp_prod;
     int i, notify;
@@ -1320,16 +1320,16 @@ static void netback_xmit(struct netback_dev *dev, int *csum_blank, int count) {
         minios_notify_remote_via_evtchn(dev->revtchn);
 
     bmk_platform_splhigh();
-    spin_lock(&netback_lock);
+    spin_lock(&xennetback_lock);
     network_rx_buf_gc(dev); 
-    spin_unlock(&netback_lock);
+    spin_unlock(&xennetback_lock);
     bmk_platform_splx(0);
 }
 
-static int netback_rxring_full(struct netback_dev *dev) {
+static int xennetback_rxring_full(struct xennetback_dev *dev) {
    XENPRINTF(("%s\n", __func__));
 
    return RING_HAS_UNCONSUMED_REQUESTS(&dev->rx);
 }
 
-static void *netback_get_private(struct netback_dev *dev) { return dev->netback_priv; }
+static void *xennetback_get_private(struct xennetback_dev *dev) { return dev->xennetback_priv; }

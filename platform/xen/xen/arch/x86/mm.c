@@ -659,6 +659,7 @@ unsigned long minios_alloc_contig_pages(int order, unsigned int addr_bits)
     unsigned int i, num_pages = 1UL << order;
     int ret, exch_success;
 
+    minios_printk("MMMMMMMMMMMMMMMMMMMMMMMMMMM.C\n");
     /* pass in num_pages 'extends' of size 1 and
      * request 1 extend of size 'order */
     struct xen_memory_exchange exchange = {
