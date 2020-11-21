@@ -28,7 +28,7 @@ endif
 ARCHDIR?= ${MACHINE}
 HW_MACHINE_ARCH?= ${MACHINE_GNU_ARCH}
 
-INSTALLTGTS=    librumpxen_netback_install
+INSTALLTGTS=    librumpxen_netback_install librumpnet_xenif_install
 
 CPPFLAGS+=	-isystem ../xen/xen/include
 CFLAGS+=	-D__XEN_INTERFACE_VERSION__=0x00030205  -Wno-unused-function -Wno-unused-but-set-variable
@@ -69,8 +69,9 @@ ${RROBJ}/platform/%.o: %.S
 
 ${MAINOBJ}: ${OBJS} platformlibs
 $(eval $(call BUILDLIB_target,librumpxen_netback,.))
+$(eval $(call BUILDLIB_target,librumpnet_xenif,.))
 
-xenlibs: ${RROBJLIB}/librumpxen_netback/librumpxen_netback.a 
+xenlibs: ${RROBJLIB}/librumpxen_netback/librumpxen_netback.a ${RROBJLIB}/librumpnet_xenif/librumpnet_xenif.a
 
 ${MAINOBJ}: ${OBJS} platformlibs xenlibs
 	${CC} -nostdlib ${CFLAGS} ${LDFLAGS} -Wl,-r ${OBJS} -o $@ \
@@ -78,7 +79,7 @@ ${MAINOBJ}: ${OBJS} platformlibs xenlibs
 	    -Wl,--whole-archive -lbmk_rumpuser -lbmk_core -Wl,--no-whole-archive
 	${OBJCOPY} -w -G bmk_* -G rumpuser_* -G jsmn_* -G minios_* -G xenbus_* \
 	    -G rumprun_platform_rumpuser_init -G _start -G netback_* \
-	    -G gntmap_* -G gnttab_* -G _minios_* $@
+	    -G netfront_* -G gntmap_* -G gnttab_* -G _minios_* $@
 
 clean: commonclean
 	rm -f ${OBJS_BMK} include/hw/machine buildtest ${MAINOBJ}

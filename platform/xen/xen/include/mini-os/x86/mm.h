@@ -161,7 +161,8 @@ typedef unsigned long maddr_t;
 extern unsigned long *_minios_phys_to_machine_mapping;
 extern char _text, _etext, _erodata, _edata, _end;
 extern unsigned long _minios_mfn_zero;
-#define pfn_to_mfn(_pfn) (_minios_phys_to_machine_mapping[(_pfn)])
+#define pfn_to_mfn(_pfn) _pfn
+//#define pfn_to_mfn(_pfn) (_minios_phys_to_machine_mapping[(_pfn)])
 static __inline__ maddr_t phys_to_machine(paddr_t phys)
 {
 	maddr_t machine = pfn_to_mfn(phys >> PAGE_SHIFT);
@@ -178,7 +179,8 @@ static __inline__ paddr_t machine_to_phys(maddr_t machine)
 }
 #endif
 
-#define VIRT_START                 ((unsigned long)&_text)
+//#define VIRT_START                 ((unsigned long)&_text)
+#define VIRT_START                 0x00
 
 #define to_phys(x)                 ((unsigned long)(x)-VIRT_START)
 #define to_virt(x)                 ((void *)((unsigned long)(x)+VIRT_START))
