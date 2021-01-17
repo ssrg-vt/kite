@@ -869,7 +869,7 @@ static void free_netback(struct xennetback_dev *dev) {
     }
 
     destroy_queue(dev->rx_list);
-    gntmap_destroy_addr_queue();
+    gntmap_destroy_addr_list();
     gntmap_fini(&dev->tx_map);
     gntmap_fini(&dev->rx_map);
 
@@ -1088,7 +1088,7 @@ done:
         goto error;
     }
 
-    if (gntmap_create_addr_queue() == NULL)
+    if (gntmap_create_addr_list() == NULL)
         goto error;
 
     gntmap_init(&dev->map_entry);
