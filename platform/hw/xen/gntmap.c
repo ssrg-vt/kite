@@ -372,7 +372,8 @@ static int _gntmap_munmap_n(struct gntmap *map, unsigned long *addresses,
     if (rc != 0)
         return rc;
 
-    add_addr_to_list(lists[gntmap_map2order(count)], *addresses);
+    for (i = 0; i < count; i++)
+    	add_addr_to_list(lists[0], addresses[i]);
 
     return 0;
 }
@@ -456,7 +457,7 @@ int gntmap_map_grant_refs_n(struct gntmap *map, uint32_t count,
 #endif
 
     for (i = 0; i < count; i++) {
-	pages[i] = (void *)get_addr_from_list(lists[gntmap_map2order(count)]);
+	pages[i] = (void *)get_addr_from_list(lists[0]);
         if (pages[i] == NULL)
             pages[i] = bmk_pgalloc_align(0, BMK_PCPU_PAGE_SIZE);
 
