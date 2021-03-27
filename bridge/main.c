@@ -7,8 +7,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "brconfig/brconfig.h"
-#include "ifconfig/ifconfig.h"
+#include "brconfig_src/brconfig.h"
+#include "ifconfig_src/ifconfig.h"
 
 void *ifconfigd_configure(char *iface_name, char *ip) {
     char *argv[12];
