@@ -22,8 +22,11 @@ void *ifconfigd_configure(char *iface_name, char *ip) {
     argv[2] = ip;
     argv[3] = "netmask";
     argv[4] = "255.255.255.0";
-    argv[5] = NULL;
-    argc = 5;
+    argv[5] = "mtu";
+//    argv[6] = "1500";
+    argv[6] = "9000";
+    argv[7] = NULL;
+    argc = 7;
     ifconfigd(argc, argv);
 
     if_status();
@@ -41,8 +44,10 @@ void *ifconfigd_create(char *iface_name) {
     argv[0] = "ifconfigd";
     argv[1] = iface_name;
     argv[2] = "create";
-    argv[3] = NULL;
-    argc = 3;
+    argv[3] = "mtu";
+    argv[4] = "9000";
+    argv[5] = NULL;
+    argc = 5;
     ifconfigd(argc, argv);
 
     printf("Bridge created\n");
@@ -68,6 +73,22 @@ void *ifconfigd_up(char *iface_name) {
     return NULL;
 }
 
+void *ifconfigd_mtu(char *iface_name) {
+    char *argv[4];
+    int argc;
+
+    printf("Interface mtu set %s\n", iface_name);
+    /* Set physical interface */
+    argv[0] = "ifconfigd";
+    argv[1] = iface_name;
+    argv[2] = "mtu";
+    argv[3] = "9000";
+    argv[4] = NULL;
+    argc = 4;
+    ifconfigd(argc, argv);
+
+    return NULL;
+}
 
 int main(int argc, char **argv) {
     struct ifaddrs *addrs, *tmp;
@@ -88,9 +109,11 @@ label:
                 int argc;
 
                 if (count == 2) {
-                    sprintf(ip, "192.168.1.%d/24", 10 + count);
+                    sprintf(ip, "192.168.0.%d/24", 10 + count);
                     ifconfigd_configure(tmp->ifa_name, ip);
                 }
+                ifconfigd_mtu(tmp->ifa_name);
+                printf("%s mtu is set\n", tmp->ifa_name);
                 ifconfigd_up(tmp->ifa_name);
                 printf("%s is up\n", tmp->ifa_name);
 

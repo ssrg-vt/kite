@@ -119,7 +119,12 @@ static int virtif_clone(struct if_clone *ifc, int num, char *path) {
     sc->sc_viu = viu;
 
     sc->sc_ec.ec_capabilities |= ETHERCAP_VLAN_MTU;
+    /* allow jumbo MTU */
+    sc->sc_ec.ec_capabilities |= ETHERCAP_JUMBO_MTU;
+    sc->sc_ec.ec_capenable = sc->sc_ec.ec_capabilities;
+
     ifp = &sc->sc_ec.ec_if;
+
     snprintf(ifp->if_xname, sizeof(ifp->if_xname), "%s", vifname);
     ifp->if_softc = sc;
 
@@ -135,8 +140,13 @@ static int virtif_clone(struct if_clone *ifc, int num, char *path) {
     IFQ_SET_READY(&ifp->if_snd);
 
     sc->sc_viu = viu;
+
+    /* override MTU size */
+    ifp->if_mtu = ETHERMTU_JUMBO;
+ 
     if_attach(ifp);
     ether_ifattach(ifp, enaddr);
+
 
     ether_snprintf(enaddrstr, sizeof(enaddrstr), enaddr);
     aprint_normal_ifnet(ifp, "Ethernet address %s\n", enaddrstr);

@@ -578,9 +578,15 @@ label:
         }
 	receive_pending--;
 
-        rmb();
+next:
+	rmb();
         RING_COPY_REQUEST(&dev->tx, req_cons, &txreqs[i]);
         req_cons++;
+
+	if (txreqs[i].flags & NETTXF_more_data) {
+		bmk_printf("MORE DATA i=%d size=%d\n", i, txreqs[i].size);
+		goto next;
+	}
 
 	addr = get_from_list(dev->tx_list);
 	if(addr == -1)
@@ -956,6 +962,12 @@ again:
     err = xenbus_printf(xbt, dev->nodename, "feature-split-event-channels", "%u", 1);
     if (err) {
     	message = "writing feature-split-event-channels";
+        goto abort_transaction;
+    }
+
+    err = xenbus_printf(xbt, dev->nodename, "feature-sg", "%u", 1);
+    if (err) {
+    	message = "writing feature-sg";
         goto abort_transaction;
     }
 
