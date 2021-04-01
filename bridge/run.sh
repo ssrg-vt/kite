@@ -1,10 +1,10 @@
 #!/bin/bash
 
-export PATH="${PATH}:$(pwd)/../rumprun-pvdrivers/bin"
+export PATH="${PATH}:$(pwd)/../rumprun-10g/bin"
 
 rm back.bin
-../rumprun-pvdrivers/bin/rumprun-bake hw_netback back.bin vifconf
+../rumprun-10g/bin/rumprun-bake hw_netback back.bin vifconf
 
 ./create_iso.sh
 
-#xl create -c back.conf
+xl create -c back.conf
