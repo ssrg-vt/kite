@@ -38,3 +38,8 @@ void VIFHYPER_DESTROY(struct virtif_user *);
 
 void VIFHYPER_SEND(struct virtif_user *, struct rump_iovec *, size_t);
 void VIFHYPER_RING_STATUS(struct virtif_user *, int *);
+
+int VIFHYPER_XN_RING_FULL(int, struct virtif_user *, int);
+void VIFHYPER_rx_copy_process(struct ifnet *, struct virtif_user *, int, int);
+void VIFHYPER_rx_copy_queue(struct virtif_user *, int *, int *, int, int, struct iovec *, int *, int);
+void VIFHYPER_RING_CONSUMPTION(struct virtif_user *, unsigned int *unconsumed);
