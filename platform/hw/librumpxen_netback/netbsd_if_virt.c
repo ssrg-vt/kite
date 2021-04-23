@@ -41,6 +41,7 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 #include <sys/device.h>
 #include <sys/intr.h>
 #include <sys/bus.h>
+#include <sys/cprng.h>
 
 #include <net/if.h>
 #include <net/if_types.h>
@@ -48,7 +49,7 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 #include <net/route.h>
 #include <net/netisr.h>
 #include <net/bpf.h>
-#include <net/if_stats.h>
+//#include <net/if_stats.h>
 #include <net/if_ether.h>
 
 #include <rump/rump.h>
@@ -75,6 +76,10 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 
 #define NB_XMIT_PAGES_BATCH 64
 
+//TODO: remove hardcoded values
+#define NET_TX_RING_SIZE 256
+#define XEN_NETIF_NR_SLOTS_MIN 18
+
 struct netif_tx_request;
 
 struct xnetback_xstate {
@@ -85,22 +90,199 @@ struct xnetback_xstate {
 	uint16_t xs_tx_size;		/* Size of data in this Tx fragment */
 };
 
-struct virtif_sc {
+struct xennetback_sc {
     struct ethercom sc_ec;
-    struct virtif_user *sc_viu;
+    struct xennetback_user *sc_viu;
     struct xnetback_xstate  sc_xstate[NB_XMIT_PAGES_BATCH];
     bus_dma_tag_t sc_dmat;
+    /* event counters */
+    struct evcnt sc_cnt_rx_cksum_blank;
+    struct evcnt sc_cnt_rx_cksum_undefer;
 };
 
-static void xennetback_free_mbufs(struct virtif_sc *sc, int queued);
-static void xennetback_ifsoftstart_copy(struct virtif_sc *sc);
+static int xennetback_ifioctl(struct ifnet *ifp, u_long cmd, void *data);
+static void xennetback_ifstart(struct ifnet *ifp);
+static void xennetback_ifwatchdog(struct ifnet * ifp);
+static int xennetback_ifinit(struct ifnet *ifp);
+static void xennetback_ifstop(struct ifnet *ifp, int disable);
+
+void xennetback_ifsoftstart_copy(struct xennetback_sc *sc);
+static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued);
+
+struct bmk_thread *softstart_thread;
+//struct if_clone VIF_CLONER =
+//    IF_CLONE_INITIALIZER(VIF_NAME, xennetback_entry, xennetback_unclone);
+
+/* This function should be the entry point for network backend driver */
+void xennetback_entry(void)
+{
+	VIFHYPER_ENTRY();
+}
+
+struct xennetback_sc* rump_xennetback_create(void* viu, char* ifp_name, char* enaddr)
+{
+	struct xennetback_sc *sc = NULL;
+	struct ifnet *ifp;
+	extern int ifqmaxlen; /* XXX */
+	int i;
+
+	sc = kmem_zalloc(sizeof(*sc), KM_SLEEP);
+	if (sc == NULL)
+		return NULL;
+
+	sc->sc_viu = viu;
+
+	ifp = &sc->sc_ec.ec_if;
+	ifp->if_softc = sc;
+        snprintf(ifp->if_xname, IFNAMSIZ, "%s", ifp_name);
+
+	/* Initialize DMA map, used only for loading PA */
+	for (i = 0; i < __arraycount(sc->sc_xstate); i++) {
+		if (bus_dmamap_create(sc->sc_dmat,
+		    ETHER_MAX_LEN_JUMBO, XEN_NETIF_NR_SLOTS_MIN,
+		    PAGE_SIZE, PAGE_SIZE, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW,
+		    &sc->sc_xstate[i].xs_dmamap)
+		    != 0) {
+			aprint_error_ifnet(ifp,
+			    "failed to allocate dma map\n");
+			return NULL;
+		}
+	}
+
+	evcnt_attach_dynamic(&sc->sc_cnt_rx_cksum_blank, EVCNT_TYPE_MISC,
+	    NULL, ifp->if_xname, "Rx csum blank");
+	evcnt_attach_dynamic(&sc->sc_cnt_rx_cksum_undefer, EVCNT_TYPE_MISC,
+	    NULL, ifp->if_xname, "Rx csum undeferred");
+
+	/* create pseudo-interface */
+	aprint_verbose_ifnet(ifp, "Ethernet address %s\n",
+	    ether_sprintf(enaddr));
+	sc->sc_ec.ec_capabilities |= ETHERCAP_VLAN_MTU | ETHERCAP_JUMBO_MTU;
+	sc->sc_ec.ec_capenable = sc->sc_ec.ec_capabilities;
+	
+
+	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	ifp->if_snd.ifq_maxlen =
+	    uimax(ifqmaxlen, NET_TX_RING_SIZE * 2);
+	ifp->if_capabilities =
+		IFCAP_CSUM_UDPv4_Rx | IFCAP_CSUM_UDPv4_Tx
+		| IFCAP_CSUM_TCPv4_Rx | IFCAP_CSUM_TCPv4_Tx
+		| IFCAP_CSUM_UDPv6_Rx | IFCAP_CSUM_UDPv6_Tx
+		| IFCAP_CSUM_TCPv6_Rx | IFCAP_CSUM_TCPv6_Tx;
+
+	ifp->if_ioctl = xennetback_ifioctl;
+	ifp->if_start = xennetback_ifstart;
+	ifp->if_watchdog = xennetback_ifwatchdog;
+	ifp->if_init = xennetback_ifinit;
+	ifp->if_stop = xennetback_ifstop;
+	ifp->if_timer = 0;
+	IFQ_SET_MAXLEN(&ifp->if_snd, uimax(2 * NET_TX_RING_SIZE, IFQ_MAXLEN));
+	IFQ_SET_READY(&ifp->if_snd);
+
+	sc->sc_viu = viu;
+
+	if_attach(ifp);
+	if_deferred_start_init(ifp, NULL);
+	ether_ifattach(ifp, enaddr);
+
+	return sc;
+}
+
+static int
+xennetback_ifioctl(struct ifnet *ifp, u_long cmd, void *data)
+{
+	//struct xnetback_instance *xneti = ifp->if_softc;
+	//struct ifreq *ifr = (struct ifreq *)data;
+	int s, error;
+
+	s = splnet();
+	error = ether_ioctl(ifp, cmd, data);
+	if (error == ENETRESET)
+		error = 0;
+	splx(s);
+	return error;
+}
 
 static void
-xennetback_ifsoftstart_copy(struct virtif_sc *sc)
+xennetback_ifstart(struct ifnet *ifp)
+{
+	struct xennetback_sc *sc = ifp->if_softc;
+	/*
+	 * The Xen communication channel is much more efficient if we can
+	 * schedule batch of packets for the domain. Deferred start by network
+	 * stack will enqueue all pending mbufs in the interface's send queue
+	 * before it is processed by the soft interrupt handler.
+	 */
+	xennetback_ifsoftstart_copy(sc);
+}
+
+static void
+xennetback_ifwatchdog(struct ifnet * ifp)
+{
+	/*
+	 * We can get to the following condition: transmit stalls because the
+	 * ring is full when the ifq is full too.
+	 *
+	 * In this case (as, unfortunately, we don't get an interrupt from xen
+	 * on transmit) nothing will ever call xennetback_ifstart() again.
+	 * Here we abuse the watchdog to get out of this condition.
+	 */
+	XENPRINTF(("xennetback_ifwatchdog\n"));
+	xennetback_ifstart(ifp);
+}
+
+static int
+xennetback_ifinit(struct ifnet *ifp)
+{
+	int s = splnet();
+
+	if ((ifp->if_flags & IFF_UP) == 0) {
+		splx(s);
+		return 0;
+	}
+	splx(s);
+	return 0;
+}
+
+void
+rump_xennetback_ifinit(struct xennetback_sc *sc)
+{
+	struct ifnet *ifp = &sc->sc_ec.ec_if;
+	int s = splnet();
+
+	ifp->if_flags |= IFF_RUNNING;
+	splx(s);
+}
+
+
+static void
+xennetback_ifstop(struct ifnet *ifp, int disable)
+{
+	//struct xnetback_instance *xneti = ifp->if_softc;
+	int s = splnet();
+
+	ifp->if_flags &= ~IFF_RUNNING;
+	ifp->if_timer = 0;
+
+	//TODO: activate the following code
+#if 0
+	if (xneti->xni_status == CONNECTED) {
+		XENPRINTF(("%s: req_prod 0x%x resp_prod 0x%x req_cons 0x%x "
+		    "event 0x%x\n", ifp->if_xname, xneti->xni_txring->req_prod,
+		    xneti->xni_txring->resp_prod, xneti->xni_txring->req_cons,
+		    xneti->xni_txring->event));
+		xennetback_evthandler(ifp->if_softc); /* flush pending RX requests */
+	}
+#endif
+	splx(s);
+}
+
+void
+xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
 {
     	struct ifnet *ifp = &sc->sc_ec.ec_if;
 	//struct ifnet *ifp = &xneti->xni_if;
-	//struct virtif_user *viu;
+	//struct xennetback_user *viu;
 	struct mbuf *m;
 	int queued = 0;
 	struct xnetback_xstate *xst;
@@ -188,7 +370,7 @@ again:
 				/* Batch already too full, flush and retry */
 				bus_dmamap_unload(sc->sc_dmat,
 				    xst->xs_dmamap);
-				VIFHYPER_rx_copy_process(ifp, sc->sc_viu, queued,
+				VIFHYPER_rx_copy_process(sc->sc_viu, queued,
 				    copycnt);
 				xennetback_free_mbufs(sc, queued);
 				queued = copycnt = 0;
@@ -202,7 +384,7 @@ again:
 			KASSERT(NB_XMIT_PAGES_BATCH <= xst->xs_dmamap->dm_nsegs);
 			/* start filling iov */
 			for(int seg=0; seg < xst->xs_dmamap->dm_nsegs; seg++) {
-            			dm[seg].iov_base = xst->xs_dmamap->dm_segs[seg].ds_addr;;
+            			dm[seg].iov_base = (void *)xst->xs_dmamap->dm_segs[seg].ds_addr;;
             			dm[seg].iov_len = xst->xs_dmamap->dm_segs[seg].ds_len;
 			}
 		
@@ -215,13 +397,15 @@ again:
 			for(int xstc=0; xstc < xst_count; xstc++)
 				(xst+xstc)->xs_m = NULL;
 
-			if_statinc(ifp, if_opackets);
+			//if_statinc(ifp, if_opackets);
 			bpf_mtap(ifp, m, BPF_D_OUT);
 		}
 		KASSERT(copycnt <= NB_XMIT_PAGES_BATCH);
 		KASSERT(queued <= copycnt);
 		if (copycnt > 0) {
-			VIFHYPER_rx_copy_process(ifp, sc->sc_viu, queued, copycnt);
+			VIFHYPER_rx_copy_process(sc->sc_viu, queued, copycnt);
+			//TODO: double check the following line
+			xennetback_free_mbufs(sc, queued);
 			queued = copycnt = 0;
 		}
 		/*
@@ -240,7 +424,7 @@ again:
 	splx(s);
 }
 
-static void xennetback_free_mbufs(struct virtif_sc *sc, int queued)
+static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued)
 {
 	struct xnetback_xstate *xst;
 
@@ -258,3 +442,184 @@ static void xennetback_free_mbufs(struct virtif_sc *sc, int queued)
 		}
 	}
 }
+
+void
+rump_tx_copy_abort(struct xennetback_sc *sc, int queued)
+{
+	struct xnetback_xstate *xst;
+
+	for (int i = 0; i < queued; i++) {
+		xst = &sc->sc_xstate[queued];
+
+		if (xst->xs_loaded) {
+			KASSERT(xst->xs_m != NULL);
+			bus_dmamap_unload(sc->sc_dmat,
+			    xst->xs_dmamap);
+			xst->xs_loaded = false;
+			m_freem(xst->xs_m);
+		}
+	}
+}
+
+
+int rump_evthandler(struct xennetback_sc *sc, int mlen, int more_data, int queued) {
+
+	struct mbuf *m, *m0 = NULL, *mlast = NULL;
+	int m0_len = 0;
+	struct xnetback_xstate *xst;
+
+	/* get a mbuf for this fragment */
+	MGETHDR(m, M_DONTWAIT, MT_DATA);
+	if (__predict_false(m == NULL))
+		return 1; // Continue
+
+	m->m_len = m->m_pkthdr.len = mlen;
+
+	if (m->m_len > MHLEN) {
+		MCLGET(m, M_DONTWAIT);
+		if (__predict_false((m->m_flags & M_EXT) == 0)) {
+			m_freem(m);
+			return 1;
+		}
+		if (__predict_false(m->m_len > MCLBYTES)) {
+			/* one more mbuf necessary */
+			struct mbuf *mn;
+			MGET(mn, M_DONTWAIT, MT_DATA);
+			if (__predict_false(mn == NULL)) {
+				m_freem(m);
+				return 1;
+			}
+			if (m->m_len - MCLBYTES > MLEN) {
+				MCLGET(mn, M_DONTWAIT);
+				if ((mn->m_flags & M_EXT) == 0) {
+					m_freem(mn);
+					m_freem(m);
+					return 1;
+				}
+			}
+			mn->m_len = m->m_len - MCLBYTES;
+			m->m_len = MCLBYTES;
+			m->m_next = mn;
+			KASSERT(mn->m_len <= MCLBYTES);
+		}
+		KASSERT(m->m_len <= MCLBYTES);
+	}
+
+	if (m0 || more_data) {
+		if (m0 == NULL) {
+			m0 = m;
+			mlast = (m->m_next) ? m->m_next : m;
+			KASSERT(mlast->m_next == NULL);
+		} else {
+			/* Coalesce like m_cat(), but without copy */
+			KASSERT(mlast != NULL);
+			if (M_TRAILINGSPACE(mlast) >= m->m_pkthdr.len) {
+				mlast->m_len +=  m->m_pkthdr.len;
+				m_freem(m);
+			} else {
+				mlast->m_next = m;
+				mlast = (m->m_next) ? m->m_next : m;
+				KASSERT(mlast->m_next == NULL);
+			}
+		}
+	}
+
+/*	XENPRINTF(("%s pkt offset %d size %d id %d req_cons %d\n",
+	    xneti->xni_if.if_xname, txreq.offset,
+	    txreq.size, txreq.id, MASK_NETIF_TX_IDX(req_cons)));
+*/
+	//xst = &xneti->xni_xstate[queued];
+	xst = &sc->sc_xstate[queued];
+	xst->xs_m = (m0 == NULL || m == m0) ? m : NULL;
+	//xst->xs_tx = txreq;
+	/* Fill the length of _this_ fragment */
+	xst->xs_tx_size = (m == m0) ? m0_len : m->m_pkthdr.len;
+
+	return m0 == NULL ? 1 : 0;
+}
+
+struct rump_iovec* rump_load_mbuf(struct xennetback_sc *sc, int queued, struct rump_iovec *iov, size_t tx_size)
+{
+	struct xnetback_xstate *xst;
+	int seg = 0, i;
+	size_t goff = 0, gsize, take;
+	bus_dmamap_t dm = NULL;
+
+	xst = &sc->sc_xstate[queued];
+
+	if (xst->xs_m != NULL) {
+		KASSERT(xst->xs_m->m_pkthdr.len == tx_size);
+		if (__predict_false(bus_dmamap_load_mbuf(
+		    sc->sc_dmat,
+		    xst->xs_dmamap, xst->xs_m, BUS_DMA_NOWAIT) != 0))
+			return NULL;
+		xst->xs_loaded = true;
+		dm = xst->xs_dmamap;
+		seg = 0;
+		goff =  0;
+	}
+
+	gsize = xst->xs_tx_size;
+	goff = 0;
+	for (i = 0; seg < dm->dm_nsegs && gsize > 0; seg++, i++) {
+		bus_dma_segment_t *ds = &dm->dm_segs[seg];
+		//ma = ds->ds_addr;
+		iov[i].iov_base = (void*)ds->ds_addr;
+		take = uimin(gsize, ds->ds_len);
+		iov[i].iov_len = take;
+		iov[i].iov_offset = ds->ds_len; // TODO: should rename offset to ds_len 
+	
+		goff += take;
+		gsize -= take;
+	}
+	KASSERT(gsize == 0);
+	KASSERT(goff == xst->xs_tx_size);
+
+	return iov;
+}
+
+void rump_pktenqueue(struct xennetback_sc *sc, int index, int flag)
+{
+	struct ifnet *ifp = &sc->sc_ec.ec_if;
+	struct xnetback_xstate *xst;
+	
+	xst = &sc->sc_xstate[index];
+	if (xst->xs_m != NULL) {
+		KASSERT(xst->xs_loaded);
+		bus_dmamap_unload(sc->sc_dmat, xst->xs_dmamap);
+
+		if (flag == 0) {
+			xennet_checksum_fill(&xst->xs_m);
+			/*xennet_checksum_fill(ifp, xst->xs_m,
+			    &sc->sc_cnt_rx_cksum_blank,
+			    &sc->sc_cnt_rx_cksum_undefer);
+			    */
+		} else if (flag == 1) {
+			xst->xs_m->m_pkthdr.csum_flags =
+			    XN_M_CSUM_SUPPORTED;
+		}
+		m_set_rcvif(xst->xs_m, ifp);
+
+		if_percpuq_enqueue(ifp->if_percpuq, xst->xs_m);
+	}
+}
+
+void rump_xennetback_destroy(struct xennetback_sc *sc)
+{
+	struct ifnet *ifp = &sc->sc_ec.ec_if;
+
+	ether_ifdetach(ifp);
+	if_detach(ifp);
+
+	evcnt_detach(&sc->sc_cnt_rx_cksum_blank);
+	evcnt_detach(&sc->sc_cnt_rx_cksum_undefer);
+
+	/* Destroy DMA maps */
+	for (int i = 0; i < __arraycount(sc->sc_xstate); i++) {
+		if (sc->sc_xstate[i].xs_dmamap != NULL) {
+			bus_dmamap_destroy(sc->sc_dmat,
+			    sc->sc_xstate[i].xs_dmamap);
+			sc->sc_xstate[i].xs_dmamap = NULL;
+		}
+	}
+}	

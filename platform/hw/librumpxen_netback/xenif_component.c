@@ -40,4 +40,4 @@ __KERNEL_RCSID(0, "$NetBSD: component.c,v 1.4 2013/07/04 11:46:51 pooka Exp $");
 #include "rump_net_private.h"
 #include "rump_private.h"
 
-RUMP_COMPONENT(RUMP_COMPONENT_NET_IF) { virtif_entry(NULL, 0); }
+RUMP_COMPONENT(RUMP_COMPONENT_NET_IF) { xennetback_entry(); }

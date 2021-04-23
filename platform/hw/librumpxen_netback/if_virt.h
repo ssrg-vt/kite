@@ -39,9 +39,14 @@ struct rump_iovec {
 
 struct if_clone;
 struct ifnet;
-struct virtif_sc;
-int rump_virtif_clone(char *);
-void rump_virtif_pktenque(struct virtif_sc *, struct iovec *, size_t,
-                            unsigned char);
-int virtif_entry(struct if_clone *ifc, int num);
-void rump_virtif_soft_start(struct ifnet *);
+
+struct xennetback_sc;
+void xennetback_entry(void);
+//void rump_xennetback_soft_start(struct ifnet *);
+struct xennetback_sc* rump_xennetback_create(void* viu, char* ifp_name, char* enaddr);
+int rump_evthandler(struct xennetback_sc *sc, int mlen, int more_data, int queued); 
+void rump_tx_copy_abort(struct xennetback_sc *sc, int queued);
+struct rump_iovec* rump_load_mbuf(struct xennetback_sc *sc, int queued, struct rump_iovec *iov, size_t gsize);
+void rump_pktenqueue(struct xennetback_sc *sc, int index, int flag);
+void rump_xennetback_ifinit(struct xennetback_sc *sc);
+void rump_xennetback_destroy(struct xennetback_sc *sc);

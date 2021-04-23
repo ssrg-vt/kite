@@ -2,8 +2,8 @@
 
 LIB=	rumpxen_netback
 
-SRCS=	if_virt.c
-SRCS+=	netbsd_if_virt.c
+#SRCS=	if_virt.c
+SRCS=	netbsd_if_virt.c
 SRCS+=	xenif_component.c
 SRCS+=  xennet_checksum.c
 
@@ -16,8 +16,8 @@ CPPFLAGS+=	-I${.CURDIR}
 CPPFLAGS+=	${IFBASE}
 CPPFLAGS+= 	-I${.CURDIR}/../../../include
 
-RUMPCOMP_USER_SRCS=	 xenif_user.c
-RUMPCOMP_USER_SRCS+=	 netbsd_xenif_user.c
+#RUMPCOMP_USER_SRCS=	 xenif_user.c
+RUMPCOMP_USER_SRCS=	 netbsd_xenif_user.c
 RUMPCOMP_USER_CPPFLAGS+= -I${.CURDIR}/../include
 RUMPCOMP_USER_CPPFLAGS+= -I${.CURDIR}/../../xen/xen/include
 RUMPCOMP_USER_CPPFLAGS+= -I${.CURDIR}/../../../include

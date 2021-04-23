@@ -25,21 +25,22 @@
  * SUCH DAMAGE.
  */
 
-struct virtif_user;
+struct xennetback_user;
 struct rump_iovec;
 
+void VIFHYPER_ENTRY(void);
 int VIFHYPER_SET_WATCH(void);
-int VIFHYPER_SET_START(struct virtif_user *, void *);
-int VIFHYPER_WAKE(struct virtif_user *);
-int VIFHYPER_CREATE(char *, struct virtif_sc *, uint8_t *,
-                    struct virtif_user **, int8_t *);
-void VIFHYPER_DYING(struct virtif_user *);
-void VIFHYPER_DESTROY(struct virtif_user *);
+int VIFHYPER_SET_START(struct xennetback_user *, void *);
+int VIFHYPER_WAKE(struct xennetback_user *);
+int VIFHYPER_CREATE(char *, struct xennetback_sc *, uint8_t *,
+                    struct xennetback_user **, int8_t *);
+void VIFHYPER_DYING(struct xennetback_user *);
+void VIFHYPER_DESTROY(struct xennetback_user *);
 
-void VIFHYPER_SEND(struct virtif_user *, struct rump_iovec *, size_t);
-void VIFHYPER_RING_STATUS(struct virtif_user *, int *);
+void VIFHYPER_SEND(struct xennetback_user *, struct rump_iovec *, size_t);
+void VIFHYPER_RING_STATUS(struct xennetback_user *, int *);
 
-int VIFHYPER_XN_RING_FULL(int, struct virtif_user *, int);
-void VIFHYPER_rx_copy_process(struct ifnet *, struct virtif_user *, int, int);
-void VIFHYPER_rx_copy_queue(struct virtif_user *, int *, int *, int, int, struct iovec *, int *, int);
-void VIFHYPER_RING_CONSUMPTION(struct virtif_user *, unsigned int *unconsumed);
+int VIFHYPER_XN_RING_FULL(int, struct xennetback_user *, int);
+void VIFHYPER_rx_copy_process(struct xennetback_user *, int, int);
+void VIFHYPER_rx_copy_queue(struct xennetback_user *, int *, int *, int, int, struct iovec *, int *, int);
+void VIFHYPER_RING_CONSUMPTION(struct xennetback_user *, unsigned int *unconsumed);
