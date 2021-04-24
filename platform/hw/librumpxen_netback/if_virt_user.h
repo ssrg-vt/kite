@@ -41,6 +41,6 @@ void VIFHYPER_SEND(struct xennetback_user *, struct rump_iovec *, size_t);
 void VIFHYPER_RING_STATUS(struct xennetback_user *, int *);
 
 int VIFHYPER_XN_RING_FULL(int, struct xennetback_user *, int);
-void VIFHYPER_rx_copy_process(struct xennetback_user *, int, int);
-void VIFHYPER_rx_copy_queue(struct xennetback_user *, int *, int *, int, int, struct iovec *, int *, int);
+void VIFHYPER_RX_COPY_PROCESS(struct xennetback_user *, int, int);
+void VIFHYPER_RX_COPY_QUEUE(struct xennetback_user *, int *, int *, int, int, struct iovec *, int *, int);
 void VIFHYPER_RING_CONSUMPTION(struct xennetback_user *, unsigned int *unconsumed);

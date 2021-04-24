@@ -370,7 +370,7 @@ again:
 				/* Batch already too full, flush and retry */
 				bus_dmamap_unload(sc->sc_dmat,
 				    xst->xs_dmamap);
-				VIFHYPER_rx_copy_process(sc->sc_viu, queued,
+				VIFHYPER_RX_COPY_PROCESS(sc->sc_viu, queued,
 				    copycnt);
 				xennetback_free_mbufs(sc, queued);
 				queued = copycnt = 0;
@@ -389,7 +389,7 @@ again:
 			}
 		
 			rxresp_flags = xst->xs_m->m_pkthdr.csum_flags & XN_M_CSUM_SUPPORTED;
-			VIFHYPER_rx_copy_queue(sc->sc_viu, &queued, &copycnt,
+			VIFHYPER_RX_COPY_QUEUE(sc->sc_viu, &queued, &copycnt,
 			    rxresp_flags,
 			    xst->xs_m->m_pkthdr.len, dm,
 			    &xst_count, xst->xs_dmamap->dm_nsegs);
@@ -403,7 +403,7 @@ again:
 		KASSERT(copycnt <= NB_XMIT_PAGES_BATCH);
 		KASSERT(queued <= copycnt);
 		if (copycnt > 0) {
-			VIFHYPER_rx_copy_process(sc->sc_viu, queued, copycnt);
+			VIFHYPER_RX_COPY_PROCESS(sc->sc_viu, queued, copycnt);
 			//TODO: double check the following line
 			xennetback_free_mbufs(sc, queued);
 			queued = copycnt = 0;

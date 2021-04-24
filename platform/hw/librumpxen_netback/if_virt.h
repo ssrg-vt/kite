@@ -29,6 +29,11 @@
 #define VIFHYPER_DESTROY VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _destroy)
 #define VIFHYPER_SEND VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _send)
 #define VIFHYPER_RING_STATUS VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _ring_status)
+#define VIFHYPER_ENTRY VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _entry)
+#define VIFHYPER_XN_RING_FULL VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _ring_ful)
+#define VIFHYPER_RX_COPY_PROCESS VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _copy_process)
+#define VIFHYPER_RX_COPY_QUEUE VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _copy_queue)
+#define VIFHYPER_RING_CONSUMPTION VIF_BASENAME3(rumpcomp_, VIRTIF_BASE, _ring_consumption)
 
 struct rump_iovec {
     void *iov_base;

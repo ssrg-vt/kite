@@ -33,7 +33,7 @@ struct iovec {
 #define	ETHER_MAX_LEN_JUMBO 9018 /* maximum jumbo frame len, including CRC */
 #define	ETHER_ADDR_LEN	6	/* length of an Ethernet address */
 
-//#define XENNET_DBG
+#define XENNET_DBG
 #ifndef XENNET_DBG
 #define XENPRINTF(x)
 #else
@@ -112,7 +112,7 @@ struct xnetback_instance {
 	/* network interface stuff */
 	//struct ethercom xni_ec;
 	//struct callout xni_restart;
-	char* xni_enaddr;
+	uint8_t xni_enaddr[ETHER_ADDR_LEN];
 	char xni_name[16];
 
 	/* remote domain communication stuff */
@@ -315,11 +315,14 @@ xennetback_instance_search(char *backend_root, struct xnetback_instance *xneti){
             bmk_memfree(dirid[id], BMK_MEMWHO_WIREDBMK);
         }
         bmk_memfree(dirid, BMK_MEMWHO_WIREDBMK);
-
+/*
+     	bmk_printf("search device 2\n");
         for (type = 0; dirt[type]; type++) {
             bmk_memfree(dirt[type], BMK_MEMWHO_WIREDBMK);
         }
+     	bmk_printf("search device 3\n");
         bmk_memfree(dirt, BMK_MEMWHO_WIREDBMK);
+*/
 }
 
 static int 
@@ -344,7 +347,7 @@ xennetback_probe_device(const char *vbdpath) {
         msize = bmk_strlen(vbdpath) + bmk_strlen(dir[i]) + 2;
         devpath = bmk_memalloc(msize, 0, BMK_MEMWHO_WIREDBMK);
         if (devpath == NULL) {
-            bmk_printf("can't malloc xbusd");
+            bmk_printf("%s: can't malloc devpath", __func__);
             return 1;
         }
 
@@ -378,16 +381,37 @@ xennetback_xenbus_create(char *xbusd_path)
 	struct xenbus_device *xbusd;
 	long domid, handle;
 	char *e, *p;
-	char mac[32];
+	char *mac;
 	int i, retry = 0;
 	char *message;
 	char path[64];
 	xenbus_transaction_t xbt;
+	long len;
 
 	xbusd = (struct xenbus_device*)bmk_memcalloc(1, sizeof(xbusd),
 			BMK_MEMWHO_WIREDBMK);
+	if(xbusd == NULL) {
+		bmk_printf("%s: cannot allocate xbusd for device at %s\n",
+				__func__, path);
+		return -1;
+	}
+
 	xbusd->xbusd_path = xbusd_path;
-	XENPRINTF(("%s = %s\n", __func__, xbusd->xbusd_path));
+
+	len = bmk_strlen(xbusd_path) + 1;
+	bmk_printf("PATH = %s\n", xbusd_path);
+	xbusd->xbusd_path = bmk_memcalloc(1, sizeof(char)*len,
+			BMK_MEMWHO_WIREDBMK);
+	if(xbusd->xbusd_path == NULL) {
+		bmk_printf("%s: cannot allocate xbusd_path for device at %s\n",
+				__func__, path);
+		bmk_memfree(xbusd, BMK_MEMWHO_WIREDBMK);
+		return -1;
+	}
+	bmk_memset(xbusd->xbusd_path, 0, sizeof(char)*len);
+	bmk_snprintf(xbusd->xbusd_path, len, "%s", xbusd_path);
+
+	XENPRINTF(("%s: path %s\n", __func__, xbusd->xbusd_path));
 
 	bmk_snprintf(path, sizeof(path), "%s/frontend-id", xbusd->xbusd_path);
 	domid = xenbus_read_integer(path);
@@ -408,6 +432,12 @@ xennetback_xenbus_create(char *xbusd_path)
 	}
 
 	xneti = bmk_memcalloc(1, sizeof(*xneti), BMK_MEMWHO_WIREDBMK);
+	if(xneti == NULL) {
+		bmk_printf("%s: cannot allocate xneti for device at %s\n",
+				__func__, path);
+		goto fail1;
+	}
+
 	xneti->xni_domid = domid;
 	xneti->xni_handle = handle;
 	xneti->xni_status = DISCONNECTED;
@@ -431,10 +461,18 @@ xennetback_xenbus_create(char *xbusd_path)
 	if(message)
 		bmk_platform_halt("Cannot read frontend path\n");
 
+	XENPRINTF(("%s: other end path %s\n", __func__, xbusd->xbusd_otherend));
+
 	xneti->xbdw_front = bmk_memcalloc(1, sizeof(xneti->xbdw_front),
 			BMK_MEMWHO_WIREDBMK);
+	if (xneti->xbdw_front == NULL)
+		goto fail;
+
 	xneti->xbdw_front->path = bmk_memcalloc(1, sizeof(path),
 			BMK_MEMWHO_WIREDBMK);
+	if (xneti->xbdw_front->path == NULL)
+		goto fail2;
+
 	bmk_snprintf(xneti->xbdw_front->path, sizeof(path), "%s/state",
 			xbusd->xbusd_otherend);
 	xneti->xbdw_front->cbfun = xennetback_frontend_changed;
@@ -471,12 +509,13 @@ xennetback_xenbus_create(char *xbusd_path)
 
 	/* read mac address */
 	bmk_snprintf(path, sizeof(path), "%s/mac", xbusd->xbusd_path);
-	message = xenbus_read(XBT_NIL, path, &xneti->xni_enaddr);
+	message = xenbus_read(XBT_NIL, path, &mac);
 
 	if (message) {
 		bmk_printf("can't read %s/mac\n", xbusd->xbusd_path);
 		goto fail;
 	}
+
 	for (i = 0, p = mac; i < ETHER_ADDR_LEN; i++) {
 		xneti->xni_enaddr[i] = bmk_strtoul(p, &e, 16);
 		if ((e[0] == '\0' && i != 5) && e[0] != ':') {
@@ -502,19 +541,21 @@ xennetback_xenbus_create(char *xbusd_path)
 	rumpuser__hyp.hyp_unschedule();
 
 	//xbusd->xbusd_otherend_changed = xennetback_frontend_changed;
-
 	do {
 		message = xenbus_transaction_start(&xbt);
 		if (message) {
 			bmk_printf("%s: can't start transaction\n",
 			    xbusd->xbusd_path);
+			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto fail;
 		}
+		bmk_printf("Transaction Started --%s--\n", xbusd->xbusd_path);
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
 		    "vifname", "%s", xneti->xni_name);
 		if (message) {
 			bmk_printf("failed to write %s/vifname\n",
 			    xbusd->xbusd_path);
+			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
@@ -522,6 +563,7 @@ xennetback_xenbus_create(char *xbusd_path)
 		if (message) {
 			bmk_printf("failed to write %s/feature-rx-copy\n",
 			    xbusd->xbusd_path);
+			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
@@ -529,6 +571,7 @@ xennetback_xenbus_create(char *xbusd_path)
 		if (message) {
 			bmk_printf("failed to write %s/feature-ipv6-csum-offload\n",
 			    xbusd->xbusd_path);
+			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
@@ -536,6 +579,7 @@ xennetback_xenbus_create(char *xbusd_path)
 		if (message) {
 			bmk_printf("failed to write %s/feature-sg\n",
 			    xbusd->xbusd_path);
+			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
 		message = xenbus_transaction_end(xbt, 1, &retry);
@@ -545,19 +589,25 @@ xennetback_xenbus_create(char *xbusd_path)
 		    xbusd->xbusd_path);
 	}
 
-	message = xenbus_switch_state(XBT_NIL, xbusd->xbusd_path, XenbusStateInitWait);
+	bmk_snprintf(path, sizeof(path), "%s/state", xbusd->xbusd_path);
+	message = xenbus_switch_state(XBT_NIL, path, XenbusStateInitWait);
 	if (message) {
 		bmk_printf("failed to switch state on %s\n",
 		    xbusd->xbusd_path);
 		goto fail;
 	}
 
+	bmk_printf("End Create\n");
 	return 0;
 
 abort_xbt:
 	xenbus_transaction_end(xbt, 1, &retry);
+fail2:
+	bmk_memfree(xneti->xbdw_front, BMK_MEMWHO_WIREDBMK);
 fail:
         bmk_memfree(xneti, BMK_MEMWHO_WIREDBMK);
+fail1:
+        bmk_memfree(xbusd, BMK_MEMWHO_WIREDBMK);
 	return -1;
 }
 
@@ -571,17 +621,17 @@ xennetback_disconnect(struct xnetback_instance *xneti)
 
 	spin_lock(&xneti->xni_lock);
 	XENPRINTF(("xennetback_disconnect: inside spinlock"));
-	if (xneti->xni_status == DISCONNECTED) {
+	if (xneti->xni_evt_status == DISCONNECTED) {
 		spin_unlock(&xneti->xni_lock);
 		return;
 	}
 	minios_unbind_evtchn(xneti->xni_evtchn);
 
 	/* signal thread that we want to disconnect, then wait for it */
-	xneti->xni_status = DISCONNECTING;
+	xneti->xni_evt_status = DISCONNECTING;
 	xennetback_sched_wake(&xneti->xni_thread_blk, xneti->xni_thread);
 
-	while (xneti->xni_status != DISCONNECTED) {
+	while (xneti->xni_evt_status != DISCONNECTED) {
 		bmk_sched_blockprepare();
 		bmk_sched_block(&xneti->xni_thread_blk.header);
 	}
@@ -627,6 +677,8 @@ xennetback_xenbus_destroy(void *arg)
 		xneti->xbdw_back = NULL;
 	}
 #endif
+	gntmap_destroy_addr_list();
+
 	/* unmap ring */
 	gntmap_fini(&xneti->xni_tx_ring_map);
 	gntmap_fini(&xneti->xni_rx_ring_map);
@@ -640,6 +692,8 @@ xennetback_xenbus_destroy(void *arg)
 	SLIST_REMOVE(&xnetback_instances, xneti, xnetback_instance, next);
 	spin_unlock(&xneti->xni_lock);
 
+	bmk_memfree(xneti->xni_xbusd->xbusd_path, BMK_MEMWHO_WIREDBMK);
+	bmk_memfree(xneti->xni_xbusd, BMK_MEMWHO_WIREDBMK);
 	bmk_memfree(xneti, BMK_MEMWHO_WIREDBMK);
 
 	return 0;
@@ -656,6 +710,7 @@ xennetback_connect(struct xnetback_instance *xneti)
 	struct xenbus_device *xbusd = xneti->xni_xbusd;
 	char path[64];
 
+	bmk_assert(xbusd != NULL);
 	XENPRINTF(("%s: %s\n", __func__, xbusd->xbusd_path));
 
 	/* read communication information */
@@ -686,7 +741,10 @@ xennetback_connect(struct xnetback_instance *xneti)
 		bmk_printf("Failed reading %s/request-rx-copy", xbusd->xbusd_otherend);
 		return -1;
 	}
-	
+
+	if (gntmap_create_addr_list() == NULL)
+		return -1;
+
 	gntmap_init(&xneti->xni_map_entry);
 	gntmap_init(&xneti->xni_tx_ring_map);
 	gntmap_init(&xneti->xni_rx_ring_map);
@@ -717,6 +775,7 @@ xennetback_connect(struct xnetback_instance *xneti)
 	rx_ring = xneti->xni_rx_ring_va;
 	BACK_RING_INIT(&xneti->xni_rxring, rx_ring, PAGE_SIZE);
 
+	xneti->xni_evt_status = WAITING;
 	xneti->xni_thread = bmk_sched_create(xneti->xni_name, NULL, 0, -1,
 			xennetback_thread, xneti, NULL, 0);
 	if(xneti->xni_thread == NULL)
@@ -730,7 +789,6 @@ xennetback_connect(struct xnetback_instance *xneti)
 	}
 	wmb();
 	xneti->xni_status = CONNECTED;
-	xneti->xni_evt_status = WAITING;
 	wmb();
 
 	/* enable the xennetback event handler machinery */
@@ -740,6 +798,7 @@ xennetback_connect(struct xnetback_instance *xneti)
 	return 0;
 
 err2:
+	gntmap_destroy_addr_list();
 	/* unmap rings */
 	if(xneti->xni_tx_ring_va)
 		gntmap_munmap(&xneti->xni_tx_ring_map,
@@ -750,7 +809,6 @@ err2:
 		gntmap_munmap(&xneti->xni_rx_ring_map,
 				(unsigned long)xneti->xni_rx_ring_va, 1);
 	gntmap_fini(&xneti->xni_rx_ring_map);
-
 err1:
 	return -1;
 }
@@ -759,11 +817,16 @@ static void
 xennetback_frontend_changed(char *path, struct xnetback_instance* xneti)
 {
 	struct xenbus_device *xbusd = xneti->xni_xbusd;
+	char state_path[64];
 
 	XENPRINTF(("%s\n", __func__));
 
 	int new_state = xenbus_read_integer(path);
-	XENPRINTF(("%s: new state %d\n", xneti->xni_if.if_xname, new_state));
+	XENPRINTF(("%s: new state %d\n", xneti->xni_name, new_state));
+
+	bmk_snprintf(state_path, sizeof(state_path), "%s/state",
+			xbusd->xbusd_path);
+
 	switch(new_state) {
 	case XenbusStateInitialising:
 	case XenbusStateInitialised:
@@ -773,7 +836,7 @@ xennetback_frontend_changed(char *path, struct xnetback_instance* xneti)
 		if (xneti->xni_status == CONNECTED)
 			break;
 		if (xennetback_connect(xneti) == 0)
-			xenbus_switch_state(XBT_NIL, xbusd->xbusd_path,
+			xenbus_switch_state(XBT_NIL, state_path,
 					XenbusStateConnected);
 		break;
 
@@ -781,7 +844,7 @@ xennetback_frontend_changed(char *path, struct xnetback_instance* xneti)
 		xneti->xni_status = DISCONNECTING;
 		//xneti->xni_if.if_flags &= ~IFF_RUNNING;
 		//xneti->xni_if.if_timer = 0;
-		xenbus_switch_state(XBT_NIL, xbusd->xbusd_path, XenbusStateClosing);
+		xenbus_switch_state(XBT_NIL, state_path, XenbusStateClosing);
 		break;
 
 	case XenbusStateClosed:
@@ -868,7 +931,7 @@ xennetback_thread(void *arg)
 			break;
 		case RUN:
 			XENPRINTF(("xennetback_thread: run: outside spinlock\n"));
-			xneti->xni_status = WAITING; /* reset state */
+			xneti->xni_evt_status = WAITING; /* reset state */
 			spin_unlock(&xneti->xni_lock);
 			bmk_platform_splx(0);
 
@@ -925,7 +988,7 @@ xennetback_tx_response(struct xnetback_instance *xneti, int id, int status)
 	xneti->xni_txring.rsp_prod_pvt++;
 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&xneti->xni_txring, do_event);
 	if (do_event) {
-		XENPRINTF(("%s send event\n", xneti->xni_if.if_xname));
+		XENPRINTF(("%s send event\n", xneti->xni_name));
         	minios_notify_remote_via_evtchn(xneti->xni_evtchn);
 	}
 }
@@ -1127,7 +1190,7 @@ xennetback_network_tx(struct xnetback_instance *xneti)
 		RING_COPY_REQUEST(&xneti->xni_txring, req_cons,
 		    &txreq);
 		rmb();
-		XENPRINTF(("%s pkt size %d\n", xneti->xni_if.if_xname,
+		XENPRINTF(("%s pkt size %d\n", xneti->xni_name,
 		    txreq.size));
 		req_cons++;
 		if (discard == 1) {
@@ -1206,7 +1269,8 @@ mbuf_fail:
 
 		XENPRINTF(("pkt offset %d size %d id %d req_cons %d\n",
 		    txreq.offset,
-		    txreq.size, txreq.id, MASK_NETIF_TX_IDX(req_cons)));
+		    txreq.size, txreq.id, req_cons));
+		    //txreq.size, txreq.id, MASK_NETIF_TX_IDX(req_cons)));
 		
 		xneti->xni_tx[queued] = txreq;
 		queued++;
@@ -1240,7 +1304,7 @@ mbuf_fail:
 }
 
 void
-VIFHYPER_rx_copy_process(struct xennetback_user *viu,
+VIFHYPER_RX_COPY_PROCESS(struct xennetback_user *viu,
 	int queued, int copycnt)
 {
 	struct xnetback_instance *xneti = viu->viu_xneti;
@@ -1263,14 +1327,14 @@ VIFHYPER_rx_copy_process(struct xennetback_user *viu,
 	if (notify) {
 		xen_rmb();
 		XENPRINTF(("%s receive event\n",
-		    xneti->xni_if.if_xname));
+		    xneti->xni_name));
         	minios_notify_remote_via_evtchn(xneti->xni_evtchn);
 	}
 
 }
 
 void
-VIFHYPER_rx_copy_queue(struct xennetback_user *viu,
+VIFHYPER_RX_COPY_QUEUE(struct xennetback_user *viu,
     int *queued, int *copycntp, int flags, int pkthdr_len, struct iovec *dm, int *xst_count, int dm_nsegs)
 {
 	struct xnetback_instance *xneti = viu->viu_xneti;
