@@ -30,6 +30,8 @@ struct iovec {
 #include "if_virt.h"
 #include "if_virt_user.h"
 
+#define XENNET_PAGE_MASK (PAGE_SIZE - 1)
+
 #define	ETHER_MAX_LEN_JUMBO 9018 /* maximum jumbo frame len, including CRC */
 #define	ETHER_ADDR_LEN	6	/* length of an Ethernet address */
 
@@ -693,8 +695,9 @@ xennetback_connect(struct xnetback_instance *xneti)
 	netif_rx_sring_t *rx_ring;
 	int tx_ring_ref, rx_ring_ref;
 	long revtchn, rx_copy;
-	struct xenbus_device *xbusd = xneti->xni_xbusd;
 	char path[64];
+	struct xenbus_device *xbusd = xneti->xni_xbusd;
+	struct xennetback_user *viu = xennetback_get_private(xneti);
 
 	bmk_assert(xbusd != NULL);
 	XENPRINTF(("%s: %s\n", __func__, xbusd->xbusd_path));
@@ -776,6 +779,10 @@ xennetback_connect(struct xnetback_instance *xneti)
 	wmb();
 	xneti->xni_status = CONNECTED;
 	wmb();
+
+    	rumpuser__hyp.hyp_schedule();
+	rump_xennetback_ifinit(viu->viu_vifsc);
+    	rumpuser__hyp.hyp_unschedule();
 
 	/* enable the xennetback event handler machinery */
 	minios_unmask_evtchn(xneti->xni_evtchn);
@@ -1011,7 +1018,7 @@ xennetback_copy(gnttab_copy_t *gop, int copycnt,
 
 	for (int i = 0; i < copycnt; i++) {
 		if (gop->status != GNTST_okay) {
-			bmk_printf("GNTTABOP_copy[%d] %s %d\n",
+			bmk_printf("GNTTABOP_copy[%d] %s status %d\n",
 			    i, dir, gop->status);
 			return BMK_EINVAL;
 		}
@@ -1069,6 +1076,9 @@ xennetback_tx_copy_process(struct xnetback_instance *xneti, int queued)
 
 		goff = 0;
 		for (; iov[seg].iov_len != 0; seg++) {
+			/*bmk_printf("%d. base=%p len=%ld off=%d\n", seg, 
+				iov[seg].iov_base, iov[seg].iov_len,
+				iov[seg].iov_offset);*/
 			ma = (paddr_t)iov[seg].iov_base;
 			take = iov[seg].iov_len;
 
@@ -1090,7 +1100,7 @@ xennetback_tx_copy_process(struct xnetback_instance *xneti, int queued)
 			gop->source.offset = xneti->xni_tx[i].offset + goff;
 			gop->source.domid = xneti->xni_domid;
 
-			gop->dest.offset = (ma & PAGE_MASK) + segoff;
+			gop->dest.offset = (ma & XENNET_PAGE_MASK) + segoff;
 			bmk_assert(gop->dest.offset <= PAGE_SIZE);
 			gop->dest.domid = DOMID_SELF;
 			gop->dest.u.gmfn = ma >> PAGE_SHIFT;
@@ -1252,8 +1262,10 @@ mbuf_fail:
 				txreq.flags & NETTXF_more_data, queued);
 		rumpuser__hyp.hyp_unschedule();
 
-		if (ret == -1)	//continue or mbuf_fail
+		if (ret == -1){	//continue or mbuf_fail
+			bmk_printf("%s: mbuf failed\n", __func__);
 			goto mbuf_fail;
+		}
 		else
 			m0 = ret;
 
@@ -1298,9 +1310,10 @@ VIFHYPER_RX_COPY_PROCESS(struct xennetback_user *viu,
 	int queued, int copycnt)
 {
 	struct xnetback_instance *xneti = viu->viu_xneti;
-	int notify;
+	int notify, nlocks;
 
-	XENPRINTF(("%s\n", __func__));
+	XENPRINTF(("VIFHYPER_RX_COPY_PROCESS\n"));
+	rumpkern_unsched(&nlocks, NULL);
 
 	if (xennetback_copy(xneti->xni_gop_copy, copycnt, "Rx") != 0) {
 		/* message already displayed */
@@ -1316,11 +1329,10 @@ VIFHYPER_RX_COPY_PROCESS(struct xennetback_user *viu,
 	/* send event */
 	if (notify) {
 		xen_rmb();
-		XENPRINTF(("%s receive event\n",
-		    xneti->xni_name));
+		XENPRINTF(("%s receive event\n", xneti->xni_name));
         	minios_notify_remote_via_evtchn(xneti->xni_evtchn);
 	}
-
+	rumpkern_sched(nlocks, NULL);
 }
 
 void
@@ -1336,10 +1348,12 @@ VIFHYPER_RX_COPY_QUEUE(struct xennetback_user *viu,
 	int copycnt = *copycntp, reqcnt = *queued;
 	//const bus_dmamap_t dm = xst0->xs_dmamap;
 	const uint8_t multiseg = dm_nsegs > 1 ? 1 : 0;
+	int nlocks;
 
 	int rsp_prod_pvt = xneti->xni_rxring.rsp_prod_pvt;
 
 	XENPRINTF(("%s\n", __func__));
+	rumpkern_unsched(&nlocks, NULL);
 
 	//bmk_assert(xst0 == &xneti->xni_xstate[reqcnt]);
 
@@ -1379,7 +1393,7 @@ VIFHYPER_RX_COPY_QUEUE(struct xennetback_user *viu,
 			/* add copy request */
 			gop = &xneti->xni_gop_copy[copycnt++];
 			gop->flags = GNTCOPY_dest_gref;
-			gop->source.offset = (ma & PAGE_MASK) + segoff;
+			gop->source.offset = (ma & XENNET_PAGE_MASK) + segoff;
 			gop->source.domid = DOMID_SELF;
 			gop->source.u.gmfn = ma >> PAGE_SHIFT;
 
@@ -1422,31 +1436,42 @@ VIFHYPER_RX_COPY_QUEUE(struct xennetback_user *viu,
 	bmk_assert(reqcnt > *queued);
 	*copycntp = copycnt;
 	*queued = reqcnt;
+	rumpkern_sched(nlocks, NULL);
 }
 		    
-void VIFHYPER_RING_CONSUMPTION(struct xennetback_user *viu, unsigned int *unconsumed)
+int VIFHYPER_RING_CONSUMPTION(struct xennetback_user *viu)
 {
+	int unconsumed, nlocks;
+
 	XENPRINTF(("%s\n", __func__));
+	rumpkern_unsched(&nlocks, NULL);
 
 	struct xnetback_instance *xneti = viu->viu_xneti;
-	*unconsumed = RING_HAS_UNCONSUMED_REQUESTS(&xneti->xni_rxring);
+	unconsumed = RING_HAS_UNCONSUMED_REQUESTS(&xneti->xni_rxring);
+
+	bmk_printf("%s: unconsumed=%d\n", __func__, unconsumed);
+	rumpkern_sched(nlocks, NULL);
+
+	return unconsumed;
 }
 
 int VIFHYPER_XN_RING_FULL(int cnt, struct xennetback_user *viu, int queued)
 {
 	struct xnetback_instance *xneti = viu->viu_xneti;
 	RING_IDX req_prod, rsp_prod_pvt;
+	int nlocks;
 
 	XENPRINTF(("%s\n", __func__));
+	rumpkern_unsched(&nlocks, NULL);
 
 	req_prod = xneti->xni_rxring.sring->req_prod;
 	rsp_prod_pvt = xneti->xni_rxring.rsp_prod_pvt;
 	rmb();
 
+	rumpkern_sched(nlocks, NULL);
 	return	req_prod == xneti->xni_rxring.req_cons + (cnt) ||  \
 		xneti->xni_rxring.req_cons - (rsp_prod_pvt + cnt) ==  \
 		NET_RX_RING_SIZE;
-
 }
 
 static void soft_start_thread_func(void *_viu)

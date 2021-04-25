@@ -65,6 +65,7 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 #include "if_virt.h"
 #include "if_virt_user.h"
 
+#define XENDEBUG_NET
 #ifdef XENDEBUG_NET
 #define XENPRINTF(x) aprint_normal x
 #else
@@ -213,7 +214,6 @@ xennetback_ifstart(struct ifnet *ifp)
 	 * stack will enqueue all pending mbufs in the interface's send queue
 	 * before it is processed by the soft interrupt handler.
 	 */
-	aprint_normal("\nIFSTART\n");
 	VIFHYPER_WAKE(sc->sc_viu);
 }
 
@@ -236,6 +236,8 @@ xennetback_ifwatchdog(struct ifnet * ifp)
 static int
 xennetback_ifinit(struct ifnet *ifp)
 {
+	XENPRINTF(("%s\n", __func__));
+
 	int s = splnet();
 
 	if ((ifp->if_flags & IFF_UP) == 0) {
@@ -250,6 +252,9 @@ void
 rump_xennetback_ifinit(struct xennetback_sc *sc)
 {
 	struct ifnet *ifp = &sc->sc_ec.ec_if;
+	
+	XENPRINTF(("%s\n", __func__));
+	
 	int s = splnet();
 
 	ifp->if_flags |= IFF_RUNNING;
@@ -261,6 +266,8 @@ static void
 xennetback_ifstop(struct ifnet *ifp, int disable)
 {
 	//struct xnetback_instance *xneti = ifp->if_softc;
+	XENPRINTF(("%s\n", __func__));
+	
 	int s = splnet();
 
 	ifp->if_flags &= ~IFF_RUNNING;
@@ -383,7 +390,7 @@ again:
 			xst->xs_loaded = true;
 			xst->xs_m = m;
 
-			KASSERT(NB_XMIT_PAGES_BATCH <= xst->xs_dmamap->dm_nsegs);
+			KASSERT(NB_XMIT_PAGES_BATCH >= xst->xs_dmamap->dm_nsegs);
 			/* start filling iov */
 			for(int seg=0; seg < xst->xs_dmamap->dm_nsegs; seg++) {
             			dm[seg].iov_base = (void *)xst->xs_dmamap->dm_segs[seg].ds_addr;;
@@ -415,8 +422,10 @@ again:
 		 * here, as the frontend doesn't notify when adding
 		 * requests anyway
 		 */
-		int *unconsumed = 0;
-		VIFHYPER_RING_CONSUMPTION(sc->sc_viu, unconsumed);
+		int unconsumed = 0;
+		unconsumed = VIFHYPER_RING_CONSUMPTION(sc->sc_viu);
+		aprint_normal("%s: abort=%d unconsumed=%d\n", __func__, 
+				abort, unconsumed);
 		if (__predict_false(abort || unconsumed)) {
 			/* ring full */
 			ifp->if_timer = 1;
@@ -424,6 +433,7 @@ again:
 		}
 	}
 	splx(s);
+	aprint_normal("%s: END\n", __func__);
 }
 
 static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued)
@@ -476,8 +486,11 @@ int rump_xennetback_network_tx(struct xennetback_sc *sc, int mlen,
 
 	/* get a mbuf for this fragment */
 	MGETHDR(m, M_DONTWAIT, MT_DATA);
-	if (__predict_false(m == NULL))
+	KASSERT(m->m_flags & M_PKTHDR);
+	if (__predict_false(m == NULL)) {
+		aprint_normal("%s: failed to get MGETHDR\n", __func__);
 		return -1; // Continue
+	}
 
 	m->m_len = m->m_pkthdr.len = mlen;
 
@@ -537,6 +550,7 @@ int rump_xennetback_network_tx(struct xennetback_sc *sc, int mlen,
 	//xst = &xneti->xni_xstate[queued];
 	xst = &sc->sc_xstate[queued];
 	xst->xs_m = (m0 == NULL || m == m0) ? m : NULL;
+	//aprint_normal("%s: m=%p val=%x\n", __func__, (void*)xst->xs_m, ((char*)xst->xs_m)[0]);
 	//xst->xs_tx = txreq;
 	/* Fill the length of _this_ fragment */
 	xst->xs_tx_size = (m == m0) ? m0_len : m->m_pkthdr.len;
@@ -544,7 +558,8 @@ int rump_xennetback_network_tx(struct xennetback_sc *sc, int mlen,
 	return m0 == NULL ? 0 : 1;
 }
 
-struct rump_iovec* rump_xennetback_load_mbuf(struct xennetback_sc *sc, int queued, struct rump_iovec *iov, size_t tx_size)
+struct rump_iovec* rump_xennetback_load_mbuf(struct xennetback_sc *sc,
+		int queued, struct rump_iovec *iov, size_t tx_size)
 {
 	struct xnetback_xstate *xst;
 	int seg = 0, i;
@@ -561,6 +576,8 @@ struct rump_iovec* rump_xennetback_load_mbuf(struct xennetback_sc *sc, int queue
 		    sc->sc_dmat,
 		    xst->xs_dmamap, xst->xs_m, BUS_DMA_NOWAIT) != 0))
 			return NULL;
+		//aprint_normal("%s: m=%p val=%x\n", __func__, (void*)xst->xs_m, ((char*)xst->xs_m)[0]);
+	KASSERT(xst->xs_m->m_flags & M_PKTHDR);
 		xst->xs_loaded = true;
 		dm = xst->xs_dmamap;
 		seg = 0;
@@ -576,7 +593,9 @@ struct rump_iovec* rump_xennetback_load_mbuf(struct xennetback_sc *sc, int queue
 		take = uimin(gsize, ds->ds_len);
 		iov[i].iov_len = take;
 		iov[i].iov_offset = ds->ds_len; // TODO: should rename offset to ds_len 
-	
+		//aprint_normal("%d. base=%p len=%ld off=%d\n", i, 
+		//	iov[i].iov_base, iov[i].iov_len, iov[i].iov_offset);
+
 		goff += take;
 		gsize -= take;
 	}
@@ -593,6 +612,8 @@ void rump_xennetback_pktenqueue(struct xennetback_sc *sc, int index, int flag)
 	
 	xst = &sc->sc_xstate[index];
 	if (xst->xs_m != NULL) {
+	//aprint_normal("%s: m=%p val=%x\n", __func__, (void*)xst->xs_m, ((char*)xst->xs_m)[0]);
+	KASSERT(xst->xs_m->m_flags & M_PKTHDR);
 		KASSERT(xst->xs_loaded);
 		bus_dmamap_unload(sc->sc_dmat, xst->xs_dmamap);
 
@@ -606,14 +627,12 @@ void rump_xennetback_pktenqueue(struct xennetback_sc *sc, int index, int flag)
 			xst->xs_m->m_pkthdr.csum_flags =
 			    XN_M_CSUM_SUPPORTED;
 		}
-#if __NetBSD_Prereq__(7, 99, 31)
-		aprint_normal("this\n");
+
 		m_set_rcvif(xst->xs_m, ifp);
-#else
-		aprint_normal("that\n");
-		xst->xs_m->m_pkthdr.rcvif = ifp;
-#endif
+
+		KERNEL_LOCK(1, NULL);
 		if_percpuq_enqueue(ifp->if_percpuq, xst->xs_m);
+		KERNEL_UNLOCK_LAST(NULL);
 	}
 }
 
