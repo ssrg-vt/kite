@@ -66,7 +66,7 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 #include "if_virt_user.h"
 
 #ifdef XENDEBUG_NET
-#define XENPRINTF(x) printf x
+#define XENPRINTF(x) aprint_normal x
 #else
 #define XENPRINTF(x)
 #endif
@@ -110,8 +110,6 @@ void xennetback_ifsoftstart_copy(struct xennetback_sc *sc);
 static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued);
 
 struct bmk_thread *softstart_thread;
-//struct if_clone VIF_CLONER =
-//    IF_CLONE_INITIALIZER(VIF_NAME, xennetback_entry, xennetback_unclone);
 
 /* This function should be the entry point for network backend driver */
 void xennetback_entry(void)
@@ -207,18 +205,22 @@ static void
 xennetback_ifstart(struct ifnet *ifp)
 {
 	struct xennetback_sc *sc = ifp->if_softc;
+
+	XENPRINTF(("%s\n", __func__));
 	/*
 	 * The Xen communication channel is much more efficient if we can
 	 * schedule batch of packets for the domain. Deferred start by network
 	 * stack will enqueue all pending mbufs in the interface's send queue
 	 * before it is processed by the soft interrupt handler.
 	 */
-	xennetback_ifsoftstart_copy(sc);
+	aprint_normal("\nIFSTART\n");
+	VIFHYPER_WAKE(sc->sc_viu);
 }
 
 static void
 xennetback_ifwatchdog(struct ifnet * ifp)
 {
+	XENPRINTF(("%s\n", __func__));
 	/*
 	 * We can get to the following condition: transmit stalls because the
 	 * ring is full when the ifq is full too.
@@ -278,7 +280,7 @@ xennetback_ifstop(struct ifnet *ifp, int disable)
 }
 
 void
-xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
+rump_xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
 {
     	struct ifnet *ifp = &sc->sc_ec.ec_if;
 	//struct ifnet *ifp = &xneti->xni_if;
@@ -292,7 +294,7 @@ xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
 	struct iovec dm[NB_XMIT_PAGES_BATCH];
 	int xst_count;
 
-	XENPRINTF(("xennetback_ifsoftstart_copy "));
+	XENPRINTF(("%s\n", __func__));
 	int s = splnet();
 	if (__predict_false((ifp->if_flags & IFF_RUNNING) == 0)) {
 		splx(s);
@@ -462,16 +464,20 @@ rump_tx_copy_abort(struct xennetback_sc *sc, int queued)
 }
 
 
-int rump_evthandler(struct xennetback_sc *sc, int mlen, int more_data, int queued) {
+int rump_xennetback_network_tx(struct xennetback_sc *sc, int mlen,
+		int more_data, int queued)
+{
 
 	struct mbuf *m, *m0 = NULL, *mlast = NULL;
 	int m0_len = 0;
 	struct xnetback_xstate *xst;
 
+	XENPRINTF(("%s\n", __func__));
+
 	/* get a mbuf for this fragment */
 	MGETHDR(m, M_DONTWAIT, MT_DATA);
 	if (__predict_false(m == NULL))
-		return 1; // Continue
+		return -1; // Continue
 
 	m->m_len = m->m_pkthdr.len = mlen;
 
@@ -479,7 +485,7 @@ int rump_evthandler(struct xennetback_sc *sc, int mlen, int more_data, int queue
 		MCLGET(m, M_DONTWAIT);
 		if (__predict_false((m->m_flags & M_EXT) == 0)) {
 			m_freem(m);
-			return 1;
+			return -1;
 		}
 		if (__predict_false(m->m_len > MCLBYTES)) {
 			/* one more mbuf necessary */
@@ -487,14 +493,14 @@ int rump_evthandler(struct xennetback_sc *sc, int mlen, int more_data, int queue
 			MGET(mn, M_DONTWAIT, MT_DATA);
 			if (__predict_false(mn == NULL)) {
 				m_freem(m);
-				return 1;
+				return -1;
 			}
 			if (m->m_len - MCLBYTES > MLEN) {
 				MCLGET(mn, M_DONTWAIT);
 				if ((mn->m_flags & M_EXT) == 0) {
 					m_freem(mn);
 					m_freem(m);
-					return 1;
+					return -1;
 				}
 			}
 			mn->m_len = m->m_len - MCLBYTES;
@@ -535,15 +541,17 @@ int rump_evthandler(struct xennetback_sc *sc, int mlen, int more_data, int queue
 	/* Fill the length of _this_ fragment */
 	xst->xs_tx_size = (m == m0) ? m0_len : m->m_pkthdr.len;
 
-	return m0 == NULL ? 1 : 0;
+	return m0 == NULL ? 0 : 1;
 }
 
-struct rump_iovec* rump_load_mbuf(struct xennetback_sc *sc, int queued, struct rump_iovec *iov, size_t tx_size)
+struct rump_iovec* rump_xennetback_load_mbuf(struct xennetback_sc *sc, int queued, struct rump_iovec *iov, size_t tx_size)
 {
 	struct xnetback_xstate *xst;
 	int seg = 0, i;
 	size_t goff = 0, gsize, take;
 	bus_dmamap_t dm = NULL;
+
+	XENPRINTF(("%s\n", __func__));
 
 	xst = &sc->sc_xstate[queued];
 
@@ -578,7 +586,7 @@ struct rump_iovec* rump_load_mbuf(struct xennetback_sc *sc, int queued, struct r
 	return iov;
 }
 
-void rump_pktenqueue(struct xennetback_sc *sc, int index, int flag)
+void rump_xennetback_pktenqueue(struct xennetback_sc *sc, int index, int flag)
 {
 	struct ifnet *ifp = &sc->sc_ec.ec_if;
 	struct xnetback_xstate *xst;
@@ -598,8 +606,13 @@ void rump_pktenqueue(struct xennetback_sc *sc, int index, int flag)
 			xst->xs_m->m_pkthdr.csum_flags =
 			    XN_M_CSUM_SUPPORTED;
 		}
+#if __NetBSD_Prereq__(7, 99, 31)
+		aprint_normal("this\n");
 		m_set_rcvif(xst->xs_m, ifp);
-
+#else
+		aprint_normal("that\n");
+		xst->xs_m->m_pkthdr.rcvif = ifp;
+#endif
 		if_percpuq_enqueue(ifp->if_percpuq, xst->xs_m);
 	}
 }

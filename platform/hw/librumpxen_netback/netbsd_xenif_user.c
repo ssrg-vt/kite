@@ -137,7 +137,7 @@ struct xnetback_instance {
 	/* event counters */
 	//struct evcnt xni_cnt_rx_cksum_blank;
 	//struct evcnt xni_cnt_rx_cksum_undefer;
-        void *xennetback_priv;
+        void *xni_priv;
 	spinlock_t xni_lock;
 	struct xennetback_watch *xbdw_front;
 	struct xennetback_watch *xbdw_back;
@@ -174,6 +174,7 @@ static void xennetback_thread(void *arg);
 static void xbdback_wakeup_thread(struct xnetback_instance *xneti);
 static int xennetback_xenbus_destroy(void *arg);
 static void xennetback_disconnect(struct xnetback_instance *xneti);
+static void soft_start_thread_func(void *_viu); 
 
 static void threadblk_callback(struct bmk_thread *prev,
         struct bmk_block_data *_data)
@@ -316,11 +317,9 @@ xennetback_instance_search(char *backend_root, struct xnetback_instance *xneti){
         }
         bmk_memfree(dirid, BMK_MEMWHO_WIREDBMK);
 /*
-     	bmk_printf("search device 2\n");
         for (type = 0; dirt[type]; type++) {
             bmk_memfree(dirt[type], BMK_MEMWHO_WIREDBMK);
         }
-     	bmk_printf("search device 3\n");
         bmk_memfree(dirt, BMK_MEMWHO_WIREDBMK);
 */
 }
@@ -481,27 +480,6 @@ xennetback_xenbus_create(char *xbusd_path)
 
 	xneti->xni_xbusd = xbusd;
 
-#if 0
-	//TODO: Check if we rally need a separate absolute_path variable
-	/* Read absolute path of this backend from it's frontend's directory*/
-	bmk_snprintf(path, sizeof(path), "%s/backend", xbusd->xbusd_otherend);
-	absolute_path = bmk_memcalloc(1, sizeof(path), BMK_MEMWHO_WIREDBMK);
-	message = xenbus_read(XBT_NIL, path, &absolute_path);
-	if(message)
-		bmk_platform_halt("Cannot read backend path\n");
-
-	xneti->xbdw_back = bmk_memcalloc(1, sizeof(xneti->xbdw_back),
-			BMK_MEMWHO_WIREDBMK);
-	xneti->xbdw_back->path = bmk_memcalloc(1, sizeof(path),
-			BMK_MEMWHO_WIREDBMK);
-	bmk_snprintf(xneti->xbdw_back->path, sizeof(path), "%s", absolute_path);
-	bmk_memfree(absolute_path, BMK_MEMWHO_WIREDBMK);
-
-	xneti->xbdw_back->cbfun = xennetback_backend_changed;
-	xneti->xbdw_back->xneti = xneti;
-	SLIST_INSERT_HEAD(&xennetback_watches, xneti->xbdw_back, next);
-#endif
-
 	bmk_snprintf(xneti->xni_name, sizeof(xneti->xni_name), "xvif%di%d",
 	    (int)domid, (int)handle);
 
@@ -533,6 +511,12 @@ xennetback_xenbus_create(char *xbusd_path)
 	if (viu == NULL)
 		goto fail;
 
+	bmk_memset(viu, 0, sizeof(*viu));
+	viu->viu_rcvrblk.header.callback = threadblk_callback;
+	viu->viu_rcvrblk.status = THREADBLK_STATUS_AWAKE;
+	viu->viu_softsblk.header.callback = threadblk_callback;
+	viu->viu_softsblk.status = THREADBLK_STATUS_AWAKE;
+
 	viu->viu_xneti = xneti;
 
 	rumpuser__hyp.hyp_schedule();
@@ -540,7 +524,8 @@ xennetback_xenbus_create(char *xbusd_path)
 			xneti->xni_enaddr);
 	rumpuser__hyp.hyp_unschedule();
 
-	//xbusd->xbusd_otherend_changed = xennetback_frontend_changed;
+	xneti->xni_priv = viu;
+
 	do {
 		message = xenbus_transaction_start(&xbt);
 		if (message) {
@@ -549,7 +534,7 @@ xennetback_xenbus_create(char *xbusd_path)
 			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto fail;
 		}
-		bmk_printf("Transaction Started --%s--\n", xbusd->xbusd_path);
+
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
 		    "vifname", "%s", xneti->xni_name);
 		if (message) {
@@ -558,6 +543,7 @@ xennetback_xenbus_create(char *xbusd_path)
 			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
+
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
 		    "feature-rx-copy", "%d", 1);
 		if (message) {
@@ -566,6 +552,7 @@ xennetback_xenbus_create(char *xbusd_path)
 			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
+
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
 		    "feature-ipv6-csum-offload", "%d", 1);
 		if (message) {
@@ -574,6 +561,7 @@ xennetback_xenbus_create(char *xbusd_path)
 			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
+
 		message = xenbus_printf(xbt, xbusd->xbusd_path,
 		    "feature-sg", "%d", 1);
 		if (message) {
@@ -582,11 +570,13 @@ xennetback_xenbus_create(char *xbusd_path)
 			bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 			goto abort_xbt;
 		}
-		message = xenbus_transaction_end(xbt, 1, &retry);
+
+		message = xenbus_transaction_end(xbt, 0, &retry);
 	} while (retry);
 	if (message) {
 		bmk_printf("%s: can't end transaction\n",
 		    xbusd->xbusd_path);
+		bmk_memfree(message, BMK_MEMWHO_WIREDBMK);
 	}
 
 	bmk_snprintf(path, sizeof(path), "%s/state", xbusd->xbusd_path);
@@ -597,7 +587,10 @@ xennetback_xenbus_create(char *xbusd_path)
 		goto fail;
 	}
 
-	bmk_printf("End Create\n");
+    	viu->viu_softsthr = bmk_sched_create("soft_start", NULL, 0, -1,
+			soft_start_thread_func, viu, NULL, 0);
+
+
 	return 0;
 
 abort_xbt:
@@ -669,14 +662,7 @@ xennetback_xenbus_destroy(void *arg)
 		bmk_memfree(xneti->xbdw_front, BMK_MEMWHO_WIREDBMK);
 		xneti->xbdw_front = NULL;
 	}
-#if 0
-	if (xneti->xbdw_back) {
-		SLIST_REMOVE(&xennetback_watches, xbdi->xbdw_back, xennetback_watch, next);
-		bmk_memfree(xneti->xbdw_back->path, BMK_MEMWHO_WIREDBMK);
-		bmk_memfree(xneti->xbdw_back, BMK_MEMWHO_WIREDBMK);
-		xneti->xbdw_back = NULL;
-	}
-#endif
+
 	gntmap_destroy_addr_list();
 
 	/* unmap ring */
@@ -966,9 +952,9 @@ xennetback_thread(void *arg)
 }
 
 static void *
-xennetback_get_private(struct xnetback_instance *dev)
+xennetback_get_private(struct xnetback_instance *xneti)
 { 
-	return dev->xennetback_priv;
+	return xneti->xni_priv;
 }
 
 static inline void
@@ -1068,8 +1054,11 @@ xennetback_tx_copy_process(struct xnetback_instance *xneti, int queued)
 	for (int i = 0; i < queued; i++) {
 		//xst = &xneti->xni_xstate[i];
 
-		bmk_memset(iov, 0, sizeof(struct iovec) * NB_XMIT_PAGES_BATCH);
-		iov = rump_load_mbuf(viu->viu_vifsc, i, send_iov, xneti->xni_tx[i].size);
+		bmk_memset(send_iov, 0, sizeof(struct iovec) * NB_XMIT_PAGES_BATCH);
+		rumpuser__hyp.hyp_schedule();
+		iov = rump_xennetback_load_mbuf(viu->viu_vifsc, i,
+				send_iov, xneti->xni_tx[i].size);
+		rumpuser__hyp.hyp_unschedule();
 
 		if(iov == NULL)
 			goto abort;
@@ -1132,7 +1121,9 @@ xennetback_tx_copy_process(struct xnetback_instance *xneti, int queued)
 		else
 			flag = -1;
 
-		rump_pktenqueue(viu->viu_vifsc, i, flag);
+		rumpuser__hyp.hyp_schedule();
+		rump_xennetback_pktenqueue(viu->viu_vifsc, i, flag);
+		rumpuser__hyp.hyp_unschedule();
 	}
 
 	return;
@@ -1170,14 +1161,13 @@ xennetback_network_tx(struct xnetback_instance *xneti)
 	int receive_pending;
 	RING_IDX req_cons;
 	int queued = 0, m0_len = 0;
-	const int discard = 1;//((ifp->if_flags & (IFF_UP | IFF_RUNNING)) !=
+	const int discard = 0;//((ifp->if_flags & (IFF_UP | IFF_RUNNING)) !=
 	    //(IFF_UP | IFF_RUNNING));
 	int m0 = 0, m_len;
     	struct xennetback_user *viu = xennetback_get_private(xneti);
 	int ret;
 
 	XENPRINTF(("%s\n", __func__));
-
 	req_cons = xneti->xni_txring.req_cons;
 	while (1) {
 		rmb(); /* be sure to read the request before updating */
@@ -1258,14 +1248,14 @@ mbuf_fail:
 		}
 
 		rumpuser__hyp.hyp_schedule();
-		ret = rump_evthandler(viu->viu_vifsc, m_len,
+		ret = rump_xennetback_network_tx(viu->viu_vifsc, m_len,
 				txreq.flags & NETTXF_more_data, queued);
 		rumpuser__hyp.hyp_unschedule();
 
-		if (ret == 1)
-			m0 = 1;
-		else if (ret == 2) //continue or mbuf_fail
+		if (ret == -1)	//continue or mbuf_fail
 			goto mbuf_fail;
+		else
+			m0 = ret;
 
 		XENPRINTF(("pkt offset %d size %d id %d req_cons %d\n",
 		    txreq.offset,
@@ -1457,4 +1447,50 @@ int VIFHYPER_XN_RING_FULL(int cnt, struct xennetback_user *viu, int queued)
 		xneti->xni_rxring.req_cons - (rsp_prod_pvt + cnt) ==  \
 		NET_RX_RING_SIZE;
 
+}
+
+static void soft_start_thread_func(void *_viu)
+{
+    struct xennetback_user *viu = (struct xennetback_user *)_viu;
+
+    XENPRINTF(("%s\n", __func__));
+
+    /* give us a rump kernel context */
+    rumpuser__hyp.hyp_schedule();
+    rumpuser__hyp.hyp_lwproc_newlwp(0);
+    rumpuser__hyp.hyp_unschedule();
+
+    while (1) {
+        bmk_sched_blockprepare();
+        bmk_sched_block(&viu->viu_softsblk.header);
+
+        size_t counter = 0;
+        __atomic_store_n(&viu->viu_softsblk.status, THREADBLK_STATUS_AWAKE,
+                         __ATOMIC_RELEASE);
+        do {
+            rumpuser__hyp.hyp_schedule();
+	    rump_xennetback_ifsoftstart_copy(viu->viu_vifsc);
+            rumpuser__hyp.hyp_unschedule();
+            /* do not monopolize the CPU */ 
+            if (++counter == 1000) {
+                	bmk_sched_yield();
+                counter = 0;
+            }
+        } while (__atomic_exchange_n(
+                     &viu->viu_softsblk.status, THREADBLK_STATUS_AWAKE,
+                     __ATOMIC_ACQ_REL) == THREADBLK_STATUS_NOTIFY);
+    }
+}
+
+int VIFHYPER_WAKE(struct xennetback_user *viu)
+{
+
+    XENPRINTF(("%s\n", __func__));
+
+    if (__atomic_exchange_n(&viu->viu_softsblk.status, THREADBLK_STATUS_NOTIFY,
+                            __ATOMIC_ACQ_REL) == THREADBLK_STATUS_SLEEP) {
+        bmk_sched_wake(viu->viu_softsthr);
+    }
+
+    return 0;
 }
