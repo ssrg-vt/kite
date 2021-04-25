@@ -1,4 +1,4 @@
-BRANCH = -pvdrivers
+BRANCH = -netbsd10
 CONF   = hw_netback
 
 BIN    = ../rumprun$(BRANCH)/bin
