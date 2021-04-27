@@ -44,3 +44,10 @@ int VIFHYPER_XN_RING_FULL(int, struct xennetback_user *, int);
 void VIFHYPER_RX_COPY_PROCESS(struct xennetback_user *, int, int);
 void VIFHYPER_RX_COPY_QUEUE(struct xennetback_user *, int *, int *, int, int, struct iovec *, int *, int);
 int VIFHYPER_RING_CONSUMPTION(struct xennetback_user *);
+void VIFHYPER_TX_COPY_ABORT(struct xennetback_user *viu, int start, int queued);
+int VIFHYPER_TX_M0LEN_FRAGMENT(struct xennetback_user *viu, int m0_len, int req_cons, int *cntp);
+void VIFHYPER_TX_RESPONSE(struct xennetback_user *viu, int id, int status);
+void VIFHYPER_TX_COPY_PREPARE(struct xennetback_user *viu, int copycnt, int take,
+	       int index, int goff, uint64_t ma, int segoff);
+int VIFHYPER_COPY(struct xennetback_user *viu, int copycnt, const char *dir);
+

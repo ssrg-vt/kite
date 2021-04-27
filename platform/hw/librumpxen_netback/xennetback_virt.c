@@ -65,7 +65,7 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 #include "if_virt.h"
 #include "if_virt_user.h"
 
-#define XENDEBUG_NET
+//#define XENDEBUG_NET
 #ifdef XENDEBUG_NET
 #define XENPRINTF(x) aprint_normal x
 #else
@@ -80,6 +80,12 @@ __KERNEL_RCSID(0, "$NetBSD: xennetback_xenbus.c,v 1.105 2020/05/05 17:02:01 bouy
 //TODO: remove hardcoded values
 #define NET_TX_RING_SIZE 256
 #define XEN_NETIF_NR_SLOTS_MIN 18
+
+#define NETIF_RSP_DROPPED         -2
+#define NETIF_RSP_ERROR           -1
+#define NETIF_RSP_OKAY             0
+/* No response: used for auxiliary requests (e.g., netif_extra_info_t). */
+#define NETIF_RSP_NULL             1
 
 struct netif_tx_request;
 
@@ -109,6 +115,8 @@ static void xennetback_ifstop(struct ifnet *ifp, int disable);
 
 void xennetback_ifsoftstart_copy(struct xennetback_sc *sc);
 static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued);
+static void xennetback_tx_copy_process(struct xennetback_sc *sc,
+		struct tx_req_info *tri, int start, int queued);
 
 struct bmk_thread *softstart_thread;
 
@@ -299,7 +307,7 @@ rump_xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
 	bool abort;
 	int rxresp_flags;
 	struct iovec dm[NB_XMIT_PAGES_BATCH];
-	int xst_count;
+	int xst_count, unconsumed;
 
 	XENPRINTF(("%s\n", __func__));
 	int s = splnet();
@@ -317,7 +325,6 @@ rump_xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
 		while (copycnt < NB_XMIT_PAGES_BATCH) {
 			if (__predict_false(VIFHYPER_XN_RING_FULL(1, sc->sc_viu, queued))) {
 				/* out of ring space */
-				aprint_normal("xennetback_ifstart: ring full");
 				abort = true;
 				break;
 			}
@@ -422,10 +429,7 @@ again:
 		 * here, as the frontend doesn't notify when adding
 		 * requests anyway
 		 */
-		int unconsumed = 0;
 		unconsumed = VIFHYPER_RING_CONSUMPTION(sc->sc_viu);
-		aprint_normal("%s: abort=%d unconsumed=%d\n", __func__, 
-				abort, unconsumed);
 		if (__predict_false(abort || unconsumed)) {
 			/* ring full */
 			ifp->if_timer = 1;
@@ -433,13 +437,13 @@ again:
 		}
 	}
 	splx(s);
-	aprint_normal("%s: END\n", __func__);
 }
 
 static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued)
 {
 	struct xnetback_xstate *xst;
 
+	XENPRINTF(("%s\n", __func__));
 	/* now that data was copied we can free the mbufs */
 	for (int j = 0; j < queued; j++) {
 		xst = &sc->sc_xstate[j];
@@ -455,11 +459,12 @@ static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued)
 	}
 }
 
-void
-rump_tx_copy_abort(struct xennetback_sc *sc, int queued)
+static void
+xennetback_tx_copy_abort(struct xennetback_sc *sc, struct tx_req_info *tri, int queued)
 {
 	struct xnetback_xstate *xst;
 
+	XENPRINTF(("%s\n", __func__));
 	for (int i = 0; i < queued; i++) {
 		xst = &sc->sc_xstate[queued];
 
@@ -469,171 +474,265 @@ rump_tx_copy_abort(struct xennetback_sc *sc, int queued)
 			    xst->xs_dmamap);
 			xst->xs_loaded = false;
 			m_freem(xst->xs_m);
+
+			VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id,
+			    NETIF_RSP_ERROR);
 		}
 	}
 }
 
+int rump_xennetback_network_tx(struct xennetback_sc *sc, struct tx_req_info *tri,
+		int tx_queued)
 
-int rump_xennetback_network_tx(struct xennetback_sc *sc, int mlen,
-		int more_data, int queued)
 {
-
+    	struct ifnet *ifp = &sc->sc_ec.ec_if;
 	struct mbuf *m, *m0 = NULL, *mlast = NULL;
-	int m0_len = 0;
+	int queued = 0, m0_len = 0;
 	struct xnetback_xstate *xst;
+	const bool discard = ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) !=
+	    (IFF_UP | IFF_RUNNING));
+	int start = 0;
 
 	XENPRINTF(("%s\n", __func__));
-
-	/* get a mbuf for this fragment */
-	MGETHDR(m, M_DONTWAIT, MT_DATA);
-	KASSERT(m->m_flags & M_PKTHDR);
-	if (__predict_false(m == NULL)) {
-		aprint_normal("%s: failed to get MGETHDR\n", __func__);
-		return -1; // Continue
-	}
-
-	m->m_len = m->m_pkthdr.len = mlen;
-
-	if (m->m_len > MHLEN) {
-		MCLGET(m, M_DONTWAIT);
-		if (__predict_false((m->m_flags & M_EXT) == 0)) {
-			m_freem(m);
-			return -1;
+	for(int i=0; i < tx_queued; i++){
+		if (__predict_false(discard)) {
+			/* interface not up, drop all requests */
+			//if_statinc(ifp, if_iqdrops);
+			VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id,
+			    NETIF_RSP_DROPPED);
+			continue;
 		}
-		if (__predict_false(m->m_len > MCLBYTES)) {
-			/* one more mbuf necessary */
-			struct mbuf *mn;
-			MGET(mn, M_DONTWAIT, MT_DATA);
-			if (__predict_false(mn == NULL)) {
-				m_freem(m);
-				return -1;
+
+		/* get a mbuf for this fragment */
+		MGETHDR(m, M_DONTWAIT, MT_DATA);
+		if (__predict_false(m == NULL)) {
+			//static struct timeval lasttime;
+mbuf_fail:
+			//if (ratecheck(&lasttime, &xni_pool_errintvl))
+			aprint_normal("%s: mbuf alloc failed\n",
+				    ifp->if_xname);
+			xennetback_tx_copy_abort(sc, tri, queued);
+			start += queued;
+			queued = 0; /*TODO: check*/
+			m0 = NULL;
+			VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id,
+			    NETIF_RSP_DROPPED);
+			//if_statinc(ifp, if_ierrors);
+			continue;
+		}
+		m->m_len = m->m_pkthdr.len = tri[i].tri_size;
+
+		if (!m0 && tri[i].tri_more_data) {
+			/*
+			 * The first fragment of multi-fragment Tx request
+			 * contains total size. Need to read whole
+			 * chain to determine actual size of the first
+			 * (i.e. current) fragment.
+			 */
+			int cnt;
+			m0_len = VIFHYPER_TX_M0LEN_FRAGMENT(sc->sc_viu,
+			    tri[i].tri_size, tri[i].tri_req_cons, &cnt);
+			m->m_len = m0_len;
+			KASSERT(cnt <= XEN_NETIF_NR_SLOTS_MIN);
+
+			if (queued + cnt >= NB_XMIT_PAGES_BATCH) {
+				/*
+				 * Flush queue if too full to fit this
+				 * new packet whole.
+				 */
+				KASSERT(m0 == NULL);
+				xennetback_tx_copy_process(sc, tri,
+						start, queued);
+				start += queued;
+				queued = 0;
 			}
-			if (m->m_len - MCLBYTES > MLEN) {
-				MCLGET(mn, M_DONTWAIT);
-				if ((mn->m_flags & M_EXT) == 0) {
-					m_freem(mn);
+		}
+
+		if (m->m_len > MHLEN) {
+			MCLGET(m, M_DONTWAIT);
+			if (__predict_false((m->m_flags & M_EXT) == 0)) {
+				m_freem(m);
+				goto mbuf_fail;
+			}
+			if (__predict_false(m->m_len > MCLBYTES)) {
+				/* one more mbuf necessary */
+				struct mbuf *mn;
+				MGET(mn, M_DONTWAIT, MT_DATA);
+				if (__predict_false(mn == NULL)) {
 					m_freem(m);
-					return -1;
+					goto mbuf_fail;
 				}
+				if (m->m_len - MCLBYTES > MLEN) {
+					MCLGET(mn, M_DONTWAIT);
+					if ((mn->m_flags & M_EXT) == 0) {
+						m_freem(mn);
+						m_freem(m);
+						goto mbuf_fail;
+					}
+				}
+				mn->m_len = m->m_len - MCLBYTES;
+				m->m_len = MCLBYTES;
+				m->m_next = mn;
+				KASSERT(mn->m_len <= MCLBYTES);
 			}
-			mn->m_len = m->m_len - MCLBYTES;
-			m->m_len = MCLBYTES;
-			m->m_next = mn;
-			KASSERT(mn->m_len <= MCLBYTES);
+			KASSERT(m->m_len <= MCLBYTES);
 		}
-		KASSERT(m->m_len <= MCLBYTES);
-	}
 
-	if (m0 || more_data) {
-		if (m0 == NULL) {
-			m0 = m;
-			mlast = (m->m_next) ? m->m_next : m;
-			KASSERT(mlast->m_next == NULL);
-		} else {
-			/* Coalesce like m_cat(), but without copy */
-			KASSERT(mlast != NULL);
-			if (M_TRAILINGSPACE(mlast) >= m->m_pkthdr.len) {
-				mlast->m_len +=  m->m_pkthdr.len;
-				m_freem(m);
-			} else {
-				mlast->m_next = m;
+		if (m0 || tri[i].tri_more_data) {
+			if (m0 == NULL) {
+				m0 = m;
 				mlast = (m->m_next) ? m->m_next : m;
 				KASSERT(mlast->m_next == NULL);
+			} else {
+				/* Coalesce like m_cat(), but without copy */
+				KASSERT(mlast != NULL);
+				if (M_TRAILINGSPACE(mlast) >= m->m_pkthdr.len) {
+					mlast->m_len +=  m->m_pkthdr.len;
+					m_freem(m);
+				} else {
+					mlast->m_next = m;
+					mlast = (m->m_next) ? m->m_next : m;
+					KASSERT(mlast->m_next == NULL);
+				}
 			}
 		}
+
+		xst = &sc->sc_xstate[queued];
+		xst->xs_m = (m0 == NULL || m == m0) ? m : NULL;
+		/* Fill the length of _this_ fragment */
+		xst->xs_tx_size = (m == m0) ? m0_len : m->m_pkthdr.len;
+		queued++;
+
+		KASSERT(queued <= NB_XMIT_PAGES_BATCH);
+		if (__predict_false(m0 &&
+		    tri[i].tri_more_data == 0)) {
+			/* Last fragment, stop appending mbufs */
+			m0 = NULL;
+		}
+		if (queued == NB_XMIT_PAGES_BATCH) {
+			KASSERT(m0 == NULL);
+			xennetback_tx_copy_process(sc, tri,
+					start, queued);
+			start += queued;
+			queued = 0;
+		}
 	}
-
-/*	XENPRINTF(("%s pkt offset %d size %d id %d req_cons %d\n",
-	    xneti->xni_if.if_xname, txreq.offset,
-	    txreq.size, txreq.id, MASK_NETIF_TX_IDX(req_cons)));
-*/
-	//xst = &xneti->xni_xstate[queued];
-	xst = &sc->sc_xstate[queued];
-	xst->xs_m = (m0 == NULL || m == m0) ? m : NULL;
-	//aprint_normal("%s: m=%p val=%x\n", __func__, (void*)xst->xs_m, ((char*)xst->xs_m)[0]);
-	//xst->xs_tx = txreq;
-	/* Fill the length of _this_ fragment */
-	xst->xs_tx_size = (m == m0) ? m0_len : m->m_pkthdr.len;
-
-	return m0 == NULL ? 0 : 1;
-}
-
-struct rump_iovec* rump_xennetback_load_mbuf(struct xennetback_sc *sc,
-		int queued, struct rump_iovec *iov, size_t tx_size)
-{
-	struct xnetback_xstate *xst;
-	int seg = 0, i;
-	size_t goff = 0, gsize, take;
-	bus_dmamap_t dm = NULL;
-
-	XENPRINTF(("%s\n", __func__));
-
-	xst = &sc->sc_xstate[queued];
-
-	if (xst->xs_m != NULL) {
-		KASSERT(xst->xs_m->m_pkthdr.len == tx_size);
-		if (__predict_false(bus_dmamap_load_mbuf(
-		    sc->sc_dmat,
-		    xst->xs_dmamap, xst->xs_m, BUS_DMA_NOWAIT) != 0))
-			return NULL;
-		//aprint_normal("%s: m=%p val=%x\n", __func__, (void*)xst->xs_m, ((char*)xst->xs_m)[0]);
-	KASSERT(xst->xs_m->m_flags & M_PKTHDR);
-		xst->xs_loaded = true;
-		dm = xst->xs_dmamap;
-		seg = 0;
-		goff =  0;
+	if (m0) {
+		/* Queue empty, and still unfinished multi-fragment request */
+		aprint_normal("%s: dropped unfinished multi-fragment\n",
+		    ifp->if_xname);
+		xennetback_tx_copy_abort(sc, tri, queued);
+		start += queued;
+		queued = 0;
+		m0 = NULL;
 	}
-
-	gsize = xst->xs_tx_size;
-	goff = 0;
-	for (i = 0; seg < dm->dm_nsegs && gsize > 0; seg++, i++) {
-		bus_dma_segment_t *ds = &dm->dm_segs[seg];
-		//ma = ds->ds_addr;
-		iov[i].iov_base = (void*)ds->ds_addr;
-		take = uimin(gsize, ds->ds_len);
-		iov[i].iov_len = take;
-		iov[i].iov_offset = ds->ds_len; // TODO: should rename offset to ds_len 
-		//aprint_normal("%d. base=%p len=%ld off=%d\n", i, 
-		//	iov[i].iov_base, iov[i].iov_len, iov[i].iov_offset);
-
-		goff += take;
-		gsize -= take;
-	}
-	KASSERT(gsize == 0);
-	KASSERT(goff == xst->xs_tx_size);
-
-	return iov;
-}
-
-void rump_xennetback_pktenqueue(struct xennetback_sc *sc, int index, int flag)
-{
-	struct ifnet *ifp = &sc->sc_ec.ec_if;
-	struct xnetback_xstate *xst;
+	if (queued > 0)
+		xennetback_tx_copy_process(sc, tri,
+				start, queued);
 	
-	xst = &sc->sc_xstate[index];
-	if (xst->xs_m != NULL) {
-	//aprint_normal("%s: m=%p val=%x\n", __func__, (void*)xst->xs_m, ((char*)xst->xs_m)[0]);
-	KASSERT(xst->xs_m->m_flags & M_PKTHDR);
-		KASSERT(xst->xs_loaded);
-		bus_dmamap_unload(sc->sc_dmat, xst->xs_dmamap);
+	/* check to see if we can transmit more packets */
+	//if_schedule_deferred_start(ifp);
 
-		if (flag == 0) {
-			xennet_checksum_fill(&xst->xs_m);
-			/*xennet_checksum_fill(ifp, xst->xs_m,
-			    &sc->sc_cnt_rx_cksum_blank,
-			    &sc->sc_cnt_rx_cksum_undefer);
-			    */
-		} else if (flag == 1) {
-			xst->xs_m->m_pkthdr.csum_flags =
-			    XN_M_CSUM_SUPPORTED;
+	return 1;
+}
+
+static void
+xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
+		int start, int queued)
+{
+	struct xnetback_xstate *xst;
+	struct ifnet *ifp = &sc->sc_ec.ec_if;
+	int copycnt = 0, seg = 0;
+	size_t goff = 0, segoff = 0, gsize, take;
+	bus_dmamap_t dm = NULL;
+	paddr_t ma;
+
+	aprint_normal("Start\n");
+	if(queued > 2)
+		aprint_normal("queued = %d\n", queued);
+	for (int i = 0; i < queued; i++) {
+		xst = &sc->sc_xstate[start + i];
+
+		if (xst->xs_m != NULL) {
+			KASSERT(xst->xs_m->m_pkthdr.len == tri[i].tri_size);
+			if (__predict_false(bus_dmamap_load_mbuf(
+			    sc->sc_dmat,
+			    xst->xs_dmamap, xst->xs_m, BUS_DMA_NOWAIT) != 0))
+				goto abort;
+			xst->xs_loaded = true;
+			dm = xst->xs_dmamap;
+			seg = 0;
+			goff = segoff = 0;
 		}
 
-		m_set_rcvif(xst->xs_m, ifp);
+		gsize = xst->xs_tx_size;
+		goff = 0;
+		for (; seg < dm->dm_nsegs && gsize > 0; seg++) {
+			bus_dma_segment_t *ds = &dm->dm_segs[seg];
+			ma = ds->ds_addr;
+			take = uimin(gsize, ds->ds_len);
 
-		KERNEL_LOCK(1, NULL);
-		if_percpuq_enqueue(ifp->if_percpuq, xst->xs_m);
-		KERNEL_UNLOCK_LAST(NULL);
+			KASSERT(copycnt <= NB_XMIT_PAGES_BATCH);
+			if (copycnt == NB_XMIT_PAGES_BATCH) {
+				if (VIFHYPER_COPY(sc->sc_viu,
+				    copycnt, "Tx") != 0)
+					goto abort;
+				copycnt = 0;
+			}
+
+			/* Queue for the copy */
+			VIFHYPER_TX_COPY_PREPARE(sc->sc_viu, copycnt++, take,
+					start + i, goff, ma, segoff);
+			goff += take;
+			gsize -= take;
+			if (take + segoff < ds->ds_len) {
+				segoff += take;
+				/* Segment not completely consumed yet */
+				break;
+			}
+			segoff = 0;
+		}
+		KASSERT(gsize == 0);
+		KASSERT(goff == xst->xs_tx_size);
 	}
+	if (copycnt > 0) {
+		if (VIFHYPER_COPY(sc->sc_viu, copycnt, "Tx"))
+			goto abort;
+		copycnt = 0;
+	}
+
+	/* If we got here, the whole copy was successful */
+	for (int i = 0; i < queued; i++) {
+		xst = &sc->sc_xstate[start + i];
+
+		VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id, NETIF_RSP_OKAY);
+
+		if (xst->xs_m != NULL) {
+			KASSERT(xst->xs_loaded);
+			bus_dmamap_unload(sc->sc_dmat, xst->xs_dmamap);
+
+			if (tri[i].tri_csum_blank) {
+				xennet_checksum_fill(&xst->xs_m);
+				//xennet_checksum_fill(ifp, xst->xs_m,
+				//    &xneti->xni_cnt_rx_cksum_blank,
+				//    &xneti->xni_cnt_rx_cksum_undefer);
+			} else if (tri[i].tri_data_validated) {
+				xst->xs_m->m_pkthdr.csum_flags =
+				    XN_M_CSUM_SUPPORTED;
+			}
+			m_set_rcvif(xst->xs_m, ifp);
+
+			KERNEL_LOCK(1, NULL);
+			if_percpuq_enqueue(ifp->if_percpuq, xst->xs_m);
+			KERNEL_UNLOCK_LAST(NULL);
+		}
+	}
+
+	aprint_normal("End\n");
+	return;
+
+abort:
+	xennetback_tx_copy_abort(sc, tri, queued);
 }
 
 void rump_xennetback_destroy(struct xennetback_sc *sc)
