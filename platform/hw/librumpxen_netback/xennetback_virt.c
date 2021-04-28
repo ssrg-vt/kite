@@ -306,7 +306,7 @@ rump_xennetback_ifsoftstart_copy(struct xennetback_sc *sc)
 	int copycnt = 0;
 	bool abort;
 	int rxresp_flags;
-	struct iovec dm[NB_XMIT_PAGES_BATCH];
+	struct iovec dma[NB_XMIT_PAGES_BATCH];
 	int xst_count, unconsumed;
 
 	XENPRINTF(("%s\n", __func__));
@@ -352,10 +352,9 @@ again:
 				if (m_defrag(m, M_DONTWAIT) == NULL) {
 					m_freem(m);
 					//static struct timeval lasttime;
-					/*if (ratecheck(&lasttime, &xni_pool_errintvl))
-						printf("%s: fail defrag mbuf\n",
+					//if (ratecheck(&lasttime, &xni_pool_errintvl))
+					aprint_normal("%s: fail defrag mbuf\n",
 						    ifp->if_xname);
-						    */
 					continue;
 				}
 
@@ -400,17 +399,18 @@ again:
 			KASSERT(NB_XMIT_PAGES_BATCH >= xst->xs_dmamap->dm_nsegs);
 			/* start filling iov */
 			for(int seg=0; seg < xst->xs_dmamap->dm_nsegs; seg++) {
-            			dm[seg].iov_base = (void *)xst->xs_dmamap->dm_segs[seg].ds_addr;;
-            			dm[seg].iov_len = xst->xs_dmamap->dm_segs[seg].ds_len;
+				dma[seg].iov_base = (void *)xst->xs_dmamap->dm_segs[seg].ds_addr;
+				dma[seg].iov_len = xst->xs_dmamap->dm_segs[seg].ds_len;
 			}
 		
 			rxresp_flags = xst->xs_m->m_pkthdr.csum_flags & XN_M_CSUM_SUPPORTED;
+			xst_count = 0;
 			VIFHYPER_RX_COPY_QUEUE(sc->sc_viu, &queued, &copycnt,
 			    rxresp_flags,
-			    xst->xs_m->m_pkthdr.len, dm,
+			    xst->xs_m->m_pkthdr.len, dma,
 			    &xst_count, xst->xs_dmamap->dm_nsegs);
 
-			for(int xstc=0; xstc < xst_count; xstc++)
+			for(int xstc = 1; xstc <= xst_count; xstc++)
 				(xst+xstc)->xs_m = NULL;
 
 			//if_statinc(ifp, if_opackets);
@@ -420,7 +420,6 @@ again:
 		KASSERT(queued <= copycnt);
 		if (copycnt > 0) {
 			VIFHYPER_RX_COPY_PROCESS(sc->sc_viu, queued, copycnt);
-			//TODO: double check the following line
 			xennetback_free_mbufs(sc, queued);
 			queued = copycnt = 0;
 		}
@@ -465,6 +464,7 @@ xennetback_tx_copy_abort(struct xennetback_sc *sc, struct tx_req_info *tri, int 
 	struct xnetback_xstate *xst;
 
 	XENPRINTF(("%s\n", __func__));
+	aprint_normal("xennetback_tx_copy_abort\n");
 	for (int i = 0; i < queued; i++) {
 		xst = &sc->sc_xstate[queued];
 
@@ -647,9 +647,6 @@ xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
 	bus_dmamap_t dm = NULL;
 	paddr_t ma;
 
-	aprint_normal("Start\n");
-	if(queued > 2)
-		aprint_normal("queued = %d\n", queued);
 	for (int i = 0; i < queued; i++) {
 		xst = &sc->sc_xstate[start + i];
 
@@ -727,8 +724,6 @@ xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
 			KERNEL_UNLOCK_LAST(NULL);
 		}
 	}
-
-	aprint_normal("End\n");
 	return;
 
 abort:
@@ -753,4 +748,4 @@ void rump_xennetback_destroy(struct xennetback_sc *sc)
 			sc->sc_xstate[i].xs_dmamap = NULL;
 		}
 	}
-}	
+}

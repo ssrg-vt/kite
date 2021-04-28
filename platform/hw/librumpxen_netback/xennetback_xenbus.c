@@ -1002,8 +1002,7 @@ xennetback_tx_check_packet(const netif_tx_request_t *txreq)
 }
 
 static int
-xennetback_copy(gnttab_copy_t *gop, int copycnt,
-    const char *dir)
+xennetback_copy(gnttab_copy_t *gop, int copycnt, const char *dir)
 {
 	XENPRINTF(("%s\n", __func__));
 
@@ -1113,10 +1112,12 @@ xennetback_network_tx(struct xnetback_instance *xneti)
 			queued = 0;
 		}
 	}
-	
-	rumpuser__hyp.hyp_schedule();
-	rump_xennetback_network_tx(viu->viu_vifsc, tri, queued);
-	rumpuser__hyp.hyp_unschedule();
+
+	if (queued > 0) {
+		rumpuser__hyp.hyp_schedule();
+		rump_xennetback_network_tx(viu->viu_vifsc, tri, queued);
+		rumpuser__hyp.hyp_unschedule();
+	}
 
 	return 1;
 }
@@ -1128,7 +1129,7 @@ VIFHYPER_RX_COPY_PROCESS(struct xennetback_user *viu,
 	struct xnetback_instance *xneti = viu->viu_xneti;
 	int notify, nlocks;
 
-	XENPRINTF(("VIFHYPER_RX_COPY_PROCESS\n"));
+	XENPRINTF(("%s\n", __func__));
 	rumpkern_unsched(&nlocks, NULL);
 
 	if (xennetback_copy(xneti->xni_gop_copy, copycnt, "Rx") != 0) {
@@ -1324,15 +1325,17 @@ static void soft_start_thread_func(void *_viu)
 
 int VIFHYPER_WAKE(struct xennetback_user *viu)
 {
+	int nlocks;
+	XENPRINTF(("%s\n", __func__));
 
-    XENPRINTF(("%s\n", __func__));
-
-    if (__atomic_exchange_n(&viu->viu_softsblk.status, THREADBLK_STATUS_NOTIFY,
+	rumpkern_unsched(&nlocks, NULL);
+	if (__atomic_exchange_n(&viu->viu_softsblk.status, THREADBLK_STATUS_NOTIFY,
                             __ATOMIC_ACQ_REL) == THREADBLK_STATUS_SLEEP) {
-        bmk_sched_wake(viu->viu_softsthr);
-    }
+        	bmk_sched_wake(viu->viu_softsthr);
+	}
+	rumpkern_sched(nlocks, NULL);
 
-    return 0;
+	return 0;
 }
 
 void VIFHYPER_TX_RESPONSE(struct xennetback_user *viu, int id, int status)
