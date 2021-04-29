@@ -459,14 +459,15 @@ static void xennetback_free_mbufs(struct xennetback_sc *sc, int queued)
 }
 
 static void
-xennetback_tx_copy_abort(struct xennetback_sc *sc, struct tx_req_info *tri, int queued)
+xennetback_tx_copy_abort(struct xennetback_sc *sc, struct tx_req_info *tri,
+		int start, int queued)
 {
 	struct xnetback_xstate *xst;
 
 	XENPRINTF(("%s\n", __func__));
 	aprint_normal("xennetback_tx_copy_abort\n");
 	for (int i = 0; i < queued; i++) {
-		xst = &sc->sc_xstate[queued];
+		xst = &sc->sc_xstate[i];
 
 		if (xst->xs_loaded) {
 			KASSERT(xst->xs_m != NULL);
@@ -475,7 +476,7 @@ xennetback_tx_copy_abort(struct xennetback_sc *sc, struct tx_req_info *tri, int 
 			xst->xs_loaded = false;
 			m_freem(xst->xs_m);
 
-			VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id,
+			VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i + start].tri_id,
 			    NETIF_RSP_ERROR);
 		}
 	}
@@ -511,9 +512,9 @@ mbuf_fail:
 			//if (ratecheck(&lasttime, &xni_pool_errintvl))
 			aprint_normal("%s: mbuf alloc failed\n",
 				    ifp->if_xname);
-			xennetback_tx_copy_abort(sc, tri, queued);
+			xennetback_tx_copy_abort(sc, tri, start, queued);
 			start += queued;
-			queued = 0; /*TODO: check*/
+			queued = 0; 
 			m0 = NULL;
 			VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id,
 			    NETIF_RSP_DROPPED);
@@ -621,18 +622,16 @@ mbuf_fail:
 		/* Queue empty, and still unfinished multi-fragment request */
 		aprint_normal("%s: dropped unfinished multi-fragment\n",
 		    ifp->if_xname);
-		xennetback_tx_copy_abort(sc, tri, queued);
-		start += queued;
-		queued = 0;
+		xennetback_tx_copy_abort(sc, tri, start, queued);
 		m0 = NULL;
 	}
+
 	if (queued > 0)
 		xennetback_tx_copy_process(sc, tri,
 				start, queued);
 	
 	/* check to see if we can transmit more packets */
 	//if_schedule_deferred_start(ifp);
-
 	return 1;
 }
 
@@ -648,10 +647,10 @@ xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
 	paddr_t ma;
 
 	for (int i = 0; i < queued; i++) {
-		xst = &sc->sc_xstate[start + i];
+		xst = &sc->sc_xstate[i];
 
 		if (xst->xs_m != NULL) {
-			KASSERT(xst->xs_m->m_pkthdr.len == tri[i].tri_size);
+			KASSERT(xst->xs_m->m_pkthdr.len == tri[i + start].tri_size);
 			if (__predict_false(bus_dmamap_load_mbuf(
 			    sc->sc_dmat,
 			    xst->xs_dmamap, xst->xs_m, BUS_DMA_NOWAIT) != 0))
@@ -664,6 +663,7 @@ xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
 
 		gsize = xst->xs_tx_size;
 		goff = 0;
+		KASSERT(dm != NULL);
 		for (; seg < dm->dm_nsegs && gsize > 0; seg++) {
 			bus_dma_segment_t *ds = &dm->dm_segs[seg];
 			ma = ds->ds_addr;
@@ -700,34 +700,33 @@ xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
 
 	/* If we got here, the whole copy was successful */
 	for (int i = 0; i < queued; i++) {
-		xst = &sc->sc_xstate[start + i];
+		xst = &sc->sc_xstate[i];
 
-		VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[i].tri_id, NETIF_RSP_OKAY);
+		VIFHYPER_TX_RESPONSE(sc->sc_viu, tri[start + i].tri_id,
+				NETIF_RSP_OKAY);
 
 		if (xst->xs_m != NULL) {
 			KASSERT(xst->xs_loaded);
 			bus_dmamap_unload(sc->sc_dmat, xst->xs_dmamap);
 
-			if (tri[i].tri_csum_blank) {
+			if (tri[start + i].tri_csum_blank) {
 				xennet_checksum_fill(&xst->xs_m);
 				//xennet_checksum_fill(ifp, xst->xs_m,
 				//    &xneti->xni_cnt_rx_cksum_blank,
 				//    &xneti->xni_cnt_rx_cksum_undefer);
-			} else if (tri[i].tri_data_validated) {
+			} else if (tri[start + i].tri_data_validated) {
 				xst->xs_m->m_pkthdr.csum_flags =
 				    XN_M_CSUM_SUPPORTED;
 			}
-			m_set_rcvif(xst->xs_m, ifp);
 
-			KERNEL_LOCK(1, NULL);
+			m_set_rcvif(xst->xs_m, ifp);
 			if_percpuq_enqueue(ifp->if_percpuq, xst->xs_m);
-			KERNEL_UNLOCK_LAST(NULL);
 		}
 	}
 	return;
 
 abort:
-	xennetback_tx_copy_abort(sc, tri, queued);
+	xennetback_tx_copy_abort(sc, tri, start, queued);
 }
 
 void rump_xennetback_destroy(struct xennetback_sc *sc)

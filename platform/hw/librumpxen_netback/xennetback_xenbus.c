@@ -169,7 +169,7 @@ static inline void xennetback_tx_response(struct xnetback_instance *xneti, int i
 static const char* xennetback_tx_check_packet(const netif_tx_request_t *txreq);
 static int xennetback_copy(gnttab_copy_t *gop, int copycnt, const char *dir);
 static int xennetback_tx_m0len_fragment(struct xnetback_instance *xneti, int m0_len, int req_cons, int *cntp);
-static int xennetback_network_tx(struct xnetback_instance *xneti);
+static void xennetback_network_tx(struct xnetback_instance *xneti);
 static void xennetback_frontend_changed(char *path, struct xnetback_instance* xneti);
 static void xennetback_evthandler(evtchn_port_t port, struct pt_regs *regs, void *data);
 static void xennetback_thread(void *arg);
@@ -1047,7 +1047,7 @@ xennetback_tx_m0len_fragment(struct xnetback_instance *xneti,
 	return m0_len;
 }
 
-static int
+static void 
 xennetback_network_tx(struct xnetback_instance *xneti)
 
 {
@@ -1055,7 +1055,7 @@ xennetback_network_tx(struct xnetback_instance *xneti)
 	int receive_pending;
 	RING_IDX req_cons;
 	unsigned int queued = 0;
-	struct tx_req_info tri[NB_XMIT_PAGES_BATCH];
+	struct tx_req_info tri[NET_TX_RING_SIZE];
     	struct xennetback_user *viu = xennetback_get_private(xneti);
 
 	XENPRINTF(("%s\n", __func__));
@@ -1103,7 +1103,6 @@ xennetback_network_tx(struct xnetback_instance *xneti)
 
 		bmk_assert(queued <= NET_TX_RING_SIZE);
 		if (queued == NET_TX_RING_SIZE) {
-			bmk_printf("queued == NET_TX_RING_SIZE\n");
 			rumpuser__hyp.hyp_schedule();
 			rump_xennetback_network_tx(viu->viu_vifsc,
 				tri, queued);
@@ -1113,13 +1112,11 @@ xennetback_network_tx(struct xnetback_instance *xneti)
 		}
 	}
 
-	if (queued > 0) {
+	if (queued > 0) {		
 		rumpuser__hyp.hyp_schedule();
 		rump_xennetback_network_tx(viu->viu_vifsc, tri, queued);
-		rumpuser__hyp.hyp_unschedule();
+		rumpuser__hyp.hyp_unschedule();	
 	}
-
-	return 1;
 }
 
 void
@@ -1313,7 +1310,7 @@ static void soft_start_thread_func(void *_viu)
 	    rump_xennetback_ifsoftstart_copy(viu->viu_vifsc);
             rumpuser__hyp.hyp_unschedule();
             /* do not monopolize the CPU */ 
-            if (++counter == 1000) {
+            if (++counter == 10) {
                 	bmk_sched_yield();
                 counter = 0;
             }
@@ -1343,6 +1340,7 @@ void VIFHYPER_TX_RESPONSE(struct xennetback_user *viu, int id, int status)
 	struct xnetback_instance *xneti = viu->viu_xneti;
 	int nlocks;
 
+	XENPRINTF(("%s\n", __func__));
 	rumpkern_unsched(&nlocks, NULL);
 	xennetback_tx_response(xneti, id, status);
 	rumpkern_sched(nlocks, NULL);
@@ -1354,6 +1352,7 @@ int VIFHYPER_TX_M0LEN_FRAGMENT(struct xennetback_user *viu,
 	struct xnetback_instance *xneti = viu->viu_xneti;
 	int ret, nlocks;
 
+	XENPRINTF(("%s\n", __func__));
 	rumpkern_unsched(&nlocks, NULL);
 	ret = xennetback_tx_m0len_fragment(xneti, m0_len, req_cons, cntp);
 	rumpkern_sched(nlocks, NULL);
@@ -1368,6 +1367,7 @@ void VIFHYPER_TX_COPY_PREPARE(struct xennetback_user *viu, int copycnt, int take
 	gnttab_copy_t *gop;
 	int nlocks;
 
+	XENPRINTF(("%s\n", __func__));
 	rumpkern_unsched(&nlocks, NULL);
 	/* Queue for the copy */
 	gop = &xneti->xni_gop_copy[copycnt];
@@ -1392,6 +1392,7 @@ int VIFHYPER_COPY(struct xennetback_user *viu, int copycnt, const char *dir)
 	struct xnetback_instance *xneti = viu->viu_xneti;
 	int ret, nlocks;
 
+	XENPRINTF(("%s\n", __func__));
 	rumpkern_unsched(&nlocks, NULL);
 	ret = xennetback_copy(xneti->xni_gop_copy, copycnt, dir);
 	rumpkern_sched(nlocks, NULL);
