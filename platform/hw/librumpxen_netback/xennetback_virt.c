@@ -627,11 +627,11 @@ mbuf_fail:
 	}
 
 	if (queued > 0)
-		xennetback_tx_copy_process(sc, tri,
-				start, queued);
+		xennetback_tx_copy_process(sc, tri, start, queued);
 	
 	/* check to see if we can transmit more packets */
-	//if_schedule_deferred_start(ifp);
+	if_schedule_deferred_start(ifp);
+
 	return 1;
 }
 
@@ -710,10 +710,10 @@ xennetback_tx_copy_process(struct xennetback_sc *sc, struct tx_req_info *tri,
 			bus_dmamap_unload(sc->sc_dmat, xst->xs_dmamap);
 
 			if (tri[start + i].tri_csum_blank) {
-				xennet_checksum_fill(&xst->xs_m);
-				//xennet_checksum_fill(ifp, xst->xs_m,
-				//    &xneti->xni_cnt_rx_cksum_blank,
-				//    &xneti->xni_cnt_rx_cksum_undefer);
+				//xennet_checksum_fill(&xst->xs_m);
+				xennet_checksum_fill(ifp, xst->xs_m,
+				    &sc->sc_cnt_rx_cksum_blank,
+				    &sc->sc_cnt_rx_cksum_undefer);
 			} else if (tri[start + i].tri_data_validated) {
 				xst->xs_m->m_pkthdr.csum_flags =
 				    XN_M_CSUM_SUPPORTED;

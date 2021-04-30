@@ -31,6 +31,8 @@
 
 struct mbuf;
 
-int xennet_checksum_fill(struct mbuf **);
+//int xennet_checksum_fill(struct mbuf **);
+int xennet_checksum_fill(struct ifnet *ifp, struct mbuf *m,
+    struct evcnt *cksum_blank, struct evcnt *cksum_undefer);
 
 #endif /* !_XEN_XENNET_CHECKSUM_H_ */
