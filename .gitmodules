@@ -4,3 +4,4 @@
 [submodule "src-netbsd"]
 	path = src-netbsd
 	url = https://github.com/ssrg-vt/src-netbsd
+	branch = kite
