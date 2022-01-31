@@ -2,4 +2,4 @@
 
 rm vifconf
 
-../obj-amd64-hw-10g/app-tools/x86_64-rumprun-netbsd-gcc -Wall -O0 -g -o vifconf ifconfig/af_atalk.c ifconfig/af_inet6.c ifconfig/ieee80211.c ifconfig/ifconfig.c ifconfig/env.c ifconfig/parse.c ifconfig/carp.c ifconfig/agr.c ifconfig/ether.c ifconfig/af_inetany.c ifconfig/media.c ifconfig/tunnel.c ifconfig/ifconfig_hostops.c ifconfig/af_inet.c ifconfig/vlan.c ifconfig/af_link.c ifconfig/util.c brconfig/brconfig.c main.c -DPORTMAP -DRUMPRUN -lprop -lutil
+../obj-amd64-hw/app-tools/x86_64-rumprun-netbsd-gcc -Wall -O0 -g -o vifconf ifconfig_src/af_atalk.c ifconfig_src/af_inet6.c ifconfig_src/ieee80211.c ifconfig_src/ifconfig.c ifconfig_src/env.c ifconfig_src/parse.c ifconfig_src/carp.c ifconfig_src/agr.c ifconfig_src/ether.c ifconfig_src/af_inetany.c ifconfig_src/media.c ifconfig_src/tunnel.c ifconfig_src/ifconfig_hostops.c ifconfig_src/af_inet.c ifconfig_src/vlan.c ifconfig_src/af_link.c ifconfig_src/util.c brconfig_src/brconfig.c main.c -DPORTMAP -DRUMPRUN -lprop -lutil

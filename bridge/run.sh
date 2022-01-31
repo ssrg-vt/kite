@@ -1,9 +1,9 @@
 #!/bin/bash
 
-export PATH="${PATH}:$(pwd)/../rumprun-10g/bin"
+export PATH="${PATH}:$(pwd)/../rumprun/bin"
 
 rm back.bin
-../rumprun-10g/bin/rumprun-bake hw_netback back.bin vifconf
+../rumprun/bin/rumprun-bake hw_netback back.bin vifconf
 
 ./create_iso.sh
 
