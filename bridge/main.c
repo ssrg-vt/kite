@@ -70,6 +70,7 @@ void *ifconfigd_up(char *iface_name) {
     argc = 3;
     ifconfigd(argc, argv);
 
+    printf("\nNetwork domain is ready.\n\n");
     return NULL;
 }
 

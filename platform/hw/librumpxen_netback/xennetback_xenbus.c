@@ -842,7 +842,9 @@ xennetback_frontend_changed(char *path, struct xnetback_instance* xneti)
 
 	case XenbusStateClosed:
 		/* otherend_changed() should handle it for us */
-		bmk_platform_halt("xennetback_frontend_changed: closed\n");
+		bmk_printf("xennetback_frontend_changed: closed\n");
+		xennetback_xenbus_destroy(xneti);
+		break;
 	case XenbusStateUnknown:
 	case XenbusStateInitWait:
 	default:
