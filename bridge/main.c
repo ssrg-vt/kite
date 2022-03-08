@@ -23,7 +23,6 @@ void *ifconfigd_configure(char *iface_name, char *ip) {
     argv[3] = "netmask";
     argv[4] = "255.255.255.0";
     argv[5] = "mtu";
-//    argv[6] = "1500";
     argv[6] = "9000";
     argv[7] = NULL;
     argc = 7;
@@ -70,7 +69,6 @@ void *ifconfigd_up(char *iface_name) {
     argc = 3;
     ifconfigd(argc, argv);
 
-    printf("\nNetwork domain is ready.\n\n");
     return NULL;
 }
 
@@ -131,6 +129,9 @@ label:
 
                 if_status();
                 if_count = count;
+
+		if (count == 2)
+			printf("\nNetwork domain is ready.\n\n");
             }
         }
         tmp = tmp->ifa_next;

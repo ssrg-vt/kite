@@ -21,8 +21,6 @@ int main(void)
     int i = 0;
     struct stat sb;
 
-    printf("This is the test program \n");
-    
     dir = opendir("/dev");            
     if (dir == NULL)  // opendir returns NULL if couldn't open directory 
     { 
@@ -48,6 +46,8 @@ int main(void)
 		i++;
     	}
     }
+
+    printf("Storage domain is ready.\n");
 
 label:
 	for(int i=0; i<12000; i++)
