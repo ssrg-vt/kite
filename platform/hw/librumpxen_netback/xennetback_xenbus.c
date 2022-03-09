@@ -304,7 +304,7 @@ xennetback_instance_search(char *backend_root, struct xnetback_instance *xneti){
 
         msg = xenbus_ls(XBT_NIL, "backend/vif", &dirid);
         if (msg) {
-            bmk_printf("Error in xenbus ls: %s\n", msg);
+	    bmk_printf("%s: Error in xenbus ls: %s\n", __func__, msg);
             bmk_memfree(msg, BMK_MEMWHO_WIREDBMK);
 
             return;
@@ -328,8 +328,7 @@ xennetback_instance_search(char *backend_root, struct xnetback_instance *xneti){
 
 static int 
 xennetback_probe_device(const char *vbdpath) {
-    int err, i, pos, msize;
-    unsigned long state;
+    int err = 0, pos, msize, state;
     char **dir;
     char *msg;
     char *devpath, path[40];
@@ -338,40 +337,37 @@ xennetback_probe_device(const char *vbdpath) {
 
     msg = xenbus_ls(XBT_NIL, vbdpath, &dir);
     if (msg) {
-        bmk_printf("Error in xenbus ls: %s\n", msg);
+        //bmk_printf("%s: Error in xenbus ls: %s\n", __func__, msg);
         bmk_memfree(msg, BMK_MEMWHO_WIREDBMK);
         return 1;
     }
 
     for (pos = 0; dir[pos]; pos++) {
-        i = pos;
-        msize = bmk_strlen(vbdpath) + bmk_strlen(dir[i]) + 2;
+        msize = bmk_strlen(vbdpath) + bmk_strlen(dir[pos]) + 2;
         devpath = bmk_memalloc(msize, 0, BMK_MEMWHO_WIREDBMK);
         if (devpath == NULL) {
             bmk_printf("%s: can't malloc devpath", __func__);
             return 1;
         }
 
-        bmk_snprintf(devpath, msize, "%s/%s", vbdpath, dir[i]);
+        bmk_snprintf(devpath, msize, "%s/%s", vbdpath, dir[pos]);
         bmk_snprintf(path, sizeof(path), "%s/state", devpath);
         state = xenbus_read_integer(path);
         if (state != XenbusStateInitialising) {
             /* device is not new */
-	    bmk_printf("%s state is %lu\n", devpath, state);
+	    bmk_printf("%s state is %d\n", devpath, state);
             bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
+	    if (state == -1)
+		    return 1;
             continue;
         }
 
 	err = xennetback_xenbus_create(devpath);
-        if (err) {
-            bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
-            return err;
-        }
-
-        bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
+        //bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
+	break;
     }
 
-    return 0;
+    return err;
 }
 
 static int
@@ -381,10 +377,9 @@ xennetback_xenbus_create(char *xbusd_path)
 	struct xnetback_instance *xneti;
 	struct xenbus_device *xbusd;
 	long domid, handle;
-	char *e, *p;
-	char *mac;
+	char *e, *p, *mac;
+	char *message, *otherend;
 	int i, retry = 0;
-	char *message;
 	char path[64];
 	xenbus_transaction_t xbt;
 	long len;
@@ -396,8 +391,6 @@ xennetback_xenbus_create(char *xbusd_path)
 				__func__, path);
 		return -1;
 	}
-
-	xbusd->xbusd_path = xbusd_path;
 
 	len = bmk_strlen(xbusd_path) + 1;
 	bmk_printf("PATH = %s\n", xbusd_path);
@@ -458,10 +451,11 @@ xennetback_xenbus_create(char *xbusd_path)
 	xbusd->xbusd_u.b.b_detach = xennetback_xenbus_destroy;
 
 	bmk_snprintf(path, sizeof(path), "%s/frontend", xbusd->xbusd_path);
-	message = xenbus_read(XBT_NIL, path, &xbusd->xbusd_otherend);
+	message = xenbus_read(XBT_NIL, path, &otherend);
 	if(message)
 		bmk_platform_halt("Cannot read frontend path\n");
 
+	bmk_snprintf(xbusd->xbusd_otherend, sizeof(xbusd->xbusd_otherend), "%s", otherend);
 	XENPRINTF(("%s: other end path %s\n", __func__, xbusd->xbusd_otherend));
 
 	xneti->xbdw_front = bmk_memcalloc(1, sizeof(xneti->xbdw_front),
@@ -591,7 +585,6 @@ xennetback_xenbus_create(char *xbusd_path)
 
     	viu->viu_softsthr = bmk_sched_create("soft_start", NULL, 0, -1,
 			soft_start_thread_func, viu, NULL, 0);
-
 
 	return 0;
 

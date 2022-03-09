@@ -195,7 +195,7 @@ typedef enum {
 
 struct xenbus_device {
 	MINIOS_LIST_ENTRY(xenbus_device) xbusd_entries;
-	char *xbusd_otherend; /* the otherend path */
+	char xbusd_otherend[200]; /* the otherend path */
 	int xbusd_otherend_id; /* the otherend's id */
 	/* callback for otherend change */
 	void (*xbusd_otherend_changed)(void *, XenbusState);

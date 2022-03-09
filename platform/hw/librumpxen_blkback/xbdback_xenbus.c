@@ -610,8 +610,7 @@ xbdback_instance_search(char *backend_root, struct xbdback_instance *xbdi){
 
 static int 
 probe_xbdback_device(const char *vbdpath) {
-    int err, i, pos, msize;
-    unsigned long state;
+    int err = 0, pos, msize, state;
     char **dir;
     char *msg;
     char *devpath, path[40];
@@ -626,34 +625,32 @@ probe_xbdback_device(const char *vbdpath) {
     }
 
     for (pos = 0; dir[pos]; pos++) {
-        i = pos;
-        msize = bmk_strlen(vbdpath) + bmk_strlen(dir[i]) + 2;
+        msize = bmk_strlen(vbdpath) + bmk_strlen(dir[pos]) + 2;
         devpath = bmk_memalloc(msize, 0, BMK_MEMWHO_WIREDBMK);
         if (devpath == NULL) {
             bmk_printf("can't malloc xbusd");
             return 1;
         }
 
-        bmk_snprintf(devpath, msize, "%s/%s", vbdpath, dir[i]);
+        bmk_snprintf(devpath, msize, "%s/%s", vbdpath, dir[pos]);
         bmk_snprintf(path, sizeof(path), "%s/state", devpath);
         state = xenbus_read_integer(path);
         if (state != XenbusStateInitialising) {
             /* device is not new */
-	    bmk_printf("%s state is %lu\n", devpath, state);
+	    bmk_printf("%s state is %d\n", devpath, state);
             bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
+
+	    if (state == -1)
+		    return 1;
             continue;
         }
 
 	err = xbdback_xenbus_create(devpath);
-        if (err) {
-            bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
-            return err;
-        }
-
-        bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
+        //bmk_memfree(devpath, BMK_MEMWHO_WIREDBMK);
+	break;
     }
 
-    return 0;
+    return err;
 }
 
 static int
@@ -663,7 +660,7 @@ xbdback_xenbus_create(char *xbusd_path)
 	struct xenbus_device *xbusd;
 	long domid, handle;
 	int error, i;
-	char *ep, *message;
+	char *ep, *message, *otherend;
 	char path[64], *absolute_path, *device_path;
 	unsigned long dev;
 
@@ -721,9 +718,12 @@ xbdback_xenbus_create(char *xbusd_path)
 	xbusd->xbusd_u.b.b_detach = xbdback_xenbus_destroy;
 
 	bmk_snprintf(path, sizeof(path), "%s/frontend", xbusd->xbusd_path);
-	message = xenbus_read(XBT_NIL, path, &xbusd->xbusd_otherend);
+	message = xenbus_read(XBT_NIL, path, &otherend);
 	if(message)
 		bmk_platform_halt("Cannot read frontend path\n");
+
+	bmk_snprintf(xbusd->xbusd_otherend, sizeof(xbusd->xbusd_otherend), "%s", otherend);
+	XENPRINTF(("%s: other end path %s\n", __func__, xbusd->xbusd_otherend));
 
 	xbdi->xbdw_front = bmk_memcalloc(1, sizeof(xbdi->xbdw_front), BMK_MEMWHO_WIREDBMK);
 	xbdi->xbdw_front->path = bmk_memcalloc(1, sizeof(path), BMK_MEMWHO_WIREDBMK);
