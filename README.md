@@ -1,68 +1,81 @@
-Rumprun SMP
-==========
+# Kite: Lightweight Critical Service Domains
 
-This repository contains a fork of [rumprun](https://github.com/rumpkernel/rumprun). This version of rumprun includes SMP support for the _hw_ platform
-of rumprun. The SMP support is provided by Ruslan Nikolaev, Virginia Tech.
-This version also includes minimalistic Xen HVM support by Ruslan Nikolaev.
-Below is the README file that was provided with the original version of
-rumprun by Antti Kantee (with changes for Xen HVM).
+Kite implements rumprun-smp based network and storage driver domains for Xen.
 
-This repository uses [rump kernels](http://rumpkernel.org) to provide
-the Rumprun [unikernel](https://en.wikipedia.org/wiki/Unikernel).
-Rumprun works on not only on hypervisors such as KVM and Xen, but also on
-bare metal.  Rumprun can be used with or without a POSIX'y interface.
-The former allows existing, unmodified POSIX applications to run
-out-of-the-box, while the latter allows building highly customized
-solutions with minimal footprints.
+## Setup (physical machine)
 
-The Rumprun unikernel supports applications written in, for example
-but not limited to: _C_, _C++_, _Erlang_, _Go_, _Java_, _Javascript (node.js)_,
-_Python_, _Ruby_ and _Rust_.
+###### Xen: 
+First, install Ubuntu 18.04 LTS on a 64bit x86 machine. Please select “Use LVM with the new Ubuntu installation”. Then, install the Xen hypervisor and reboot the machine;
+GRUB should automatically boot Xen and launch Dom0:
 
-You will find ready-made software packages for Rumprun from the
-[rumprun-packages repository](http://repo.rumpkernel.org/rumprun-packages).
-Some examples of software available from there includes _LevelDB_,
-_Memcached_, _nanomsg_, _Nginx_ and _Redis_.  See the packages repository
-for further details.
+```
+# apt install xen-hypervisor-amd64
+```
 
-See the [wiki](http://wiki.rumpkernel.org/Repo:-rumprun) for more
-information and instructions.  You may also want to watch video
-tutorials in the
-[Rumprun unikernel video series](http://wiki.rumpkernel.org/Tutorial%3A-Rumprun-unikernel-video-series).
+###### PCI passthrough: 
+Find BDF numbers of the available PCI devices (NIC, NVMe) using the lspci command. Then, add the corresponding device to the PCI assignable
+list, where xx:xx.x represents the BDF number:
 
-Note: some of our tools will throw a warning about them
-being experimental.  It does not mean that they
-are not expected to produce a working result, just that the usage
-is not necessarily final.  The wiki
-[explains](http://wiki.rumpkernel.org/Repo%3A-rumprun#experimental-nature)
-further.
+```
+# modprobe xen-pciback
+# xl pci-assignable-add xx:xx.x
+```
 
-**gcc 8** or higher: newer versions of gcc may produce additional warnings
-which are treated as errors; you can use a workaround by specifying
-CC=/absolute/path/to/rumprun/gcc8fix.sh
-(e.g., CC=~/rumprun-smp/gcc8fix.sh ./build-rr.sh hw).
+###### Kite’s build environment:
+First, install some pre-requisite libraries.
 
-hw
---
+```
+# apt install build-essential git
+# apt install libz-dev libxen-dev
+```
 
-The hardware (``hw'') platform is meant for embedded systems
-and the cloud.  It works on raw hardware, but also supports
-_virtio_ drivers and KVM.  For a demonstration, see this [youtube
-video](https://www.youtube.com/watch?v=EyeRplLMx4c) where the hw platform
-is booted on a laptop and plays audio using the PCI hdaudio drivers.
-The supported CPU architectures are x86_32, x86_64 and ARM.
+Next, get Kite’s source and build it:
 
-Xen HVM
--------
-Xen HVM technically belongs to the _hw_ platform. You need
-to compile the code as _hw_ and bake an ISO image. Then you can boot
-the ISO image in the HVM mode.
+```
+$ git clone https://github.com/ssrg-vt/kite
+$ cd kite
+$ git submodule update --init --recursive --remote
+$ CC=`echo $PWD`/gcc8fix.sh ./build-rr.sh -j16 hw
+$ cd bridge
+$ ./ifconf.sh && ./run.sh
+$ cd ../vbdconf
+$ ./run.sh
+```
 
-Xen PV
-------
+## Running Kite driver domains
+###### Network domain:
+First, update Artifact/config/network/ubunt_dd.cfg with the BDF number of the network device:
 
-The Xen platform is optimized for running on top of the Xen hypervisor
-as a paravirtualized guest, and provides support for virtualization
-functions not available on the _hw_ platform.  The Xen platform will
-work both against the `xl` tools and the Amazon EC2 cloud.
-The supported CPU architectures are x86_32 and x86_64.
+```
+pci=[‘xx:xx.x,permissive=1’]
+```
+Next, launch the Kite network domain using the following command.
+
+```
+# xl create -c Artifact/config/network/kite_dd.cfg
+```
+
+###### Storage domain:
+First, update Artifact/config/storage/ubunt_dd.cfg with the BDF number of the storage device:
+
+```
+pci=[‘xx:xx.x,permissive=1’]
+```
+Next, launch the Kite storage domain using the following command.
+
+```
+# xl create -c Artifact/config/network/kite_dd.cfg
+```
+
+## Some importatnt directories
+
+```
+kite/
+ \_ Artifact                    - Evaluation instruction and files
+ \_ bridge/                     - Network domain application 
+ \_ platform/
+|   \_ hw/
+|     \_ librumpxen_blkback/    - Storage driver backend
+|     \_ librumpxen_netback/    - Network driver backend
+\_ vbdconf/                     - Storage domain application
+```
