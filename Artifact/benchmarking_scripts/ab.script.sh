@@ -4,11 +4,12 @@
 
 requests=10000
 #concurrency=(5 10 20 40 80 100)
-concurrency=(5)
-#size=(512 1k 2k 4k 8k 16k 32k 64k 128k)
-size=(256k)
+concurrency=(1)
+size=(512 4k 16k 64k 256k)
+#size=(256k)
 
-rm result.txt mean.txt sd.txt
+rm mean.txt sd.txt
+echo "Block Throughput(Kbps)" >> result_$1
 
 for s in ${size[@]}; do
 	output=""
@@ -23,7 +24,8 @@ for s in ${size[@]}; do
 		output="${output} $result"
 		sleep 2
 	done
-	echo $output >> "result.txt"
+	echo "$s $output" >> result_$1
+	sleep 30
 done
 
 #output format
@@ -39,3 +41,4 @@ done
 # 32K
 #
 # 64K
+

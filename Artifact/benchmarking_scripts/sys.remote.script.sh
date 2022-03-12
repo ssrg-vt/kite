@@ -1,13 +1,10 @@
 #!/bin/bash
-#This script should be located at the client machine
 
 host=192.168.0.31
-user='user'
-pass='a'
+user='username'
+pass='user_password'
 port=3306
-time_in_sec=180
-#threads=(1 5 10 20 40 60 80 100)
-threads=(1 5)
+time_in_sec=30
 
 #rm result.txt
 
@@ -17,4 +14,5 @@ total=0.0
 for TP in ${THROUGHPUT[@]}; do
 	total=$(echo $TP + $total | bc)
 done
-echo  $1 $total >> result.txt
+echo  $1 $total >> mysql.tp.txt
+

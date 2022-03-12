@@ -1,13 +1,11 @@
-#/bin/bash
-#This script should be located at the VM where MySQL sever and sar tool is installed.
+#!/bin/bash
 
-#threads=(1 5 10 20 40 60 80 100)
-threads=(1 5)
+threads=(1 5 10 20 40 60 80 100)
 
-rm result.txt
+rm mysql.cpu.txt
 
 for thread in ${threads[@]}; do
-	./sar -u -o datafile 1 > out &
+	./sysstat-12.3.3/sar -u -o datafile 1 > out &
 	ssh user@192.168.0.20 -t "/home/user/sys.remote.script.sh $thread"
 	pkill sar
 
@@ -41,5 +39,6 @@ for thread in ${threads[@]}; do
 	div=$(awk '{print 2*$1/$2}' <<<"${sum} ${count}")
 	sd=`bc -l <<< "sqrt($div)"`
 
-	echo $thread $avg $sd>> result.txt
+#	echo $thread $avg $sd>> mysql.cpu.txt
+	echo $thread $avg>> mysql.cpu.txt
 done
