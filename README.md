@@ -1,6 +1,6 @@
 # Kite: Lightweight Critical Service Domains
 
-Kite implements rumprun-based network and storage driver domains for Xen. The corresponding EuroSys 2022 paper is available at this [link](https://www.ssrg.ece.vt.edu/papers/eurosys22.pdf).
+Kite implements rumprun-based network and storage driver domains for Xen. The corresponding EuroSys 2022 paper is available at this [link](https://dl.acm.org/doi/pdf/10.1145/3492321.3519586).
 
 See the paper's Appendix for artifact description and general installation
 instructions. Similar instructions are available in Artifact/README.pdf. See also Artifact/README_benchmark.pdf for the instructions to set up the required benchmark environment in the Ubuntu guest VM and client machine to evaluate Xen driver domains, such as Ubuntu and Kite.
