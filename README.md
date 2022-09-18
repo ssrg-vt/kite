@@ -88,3 +88,21 @@ kite/
 |     \_ librumpxen_netback/    - Network driver backend
 \_ vbdconf/                     - Storage domain application
 ```
+## Reference
+```
+@inproceedings{10.1145/3492321.3519586,
+author = {Mehrab, A K M Fazla and Nikolaev, Ruslan and Ravindran, Binoy},
+title = {Kite: Lightweight Critical Service Domains},
+year = {2022},
+isbn = {9781450391627},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3492321.3519586},
+doi = {10.1145/3492321.3519586},
+pages = {384–401},
+numpages = {18},
+keywords = {hypervisor, unikernel, Xen, virtual machine},
+location = {Rennes, France},
+series = {EuroSys '22}
+}
+```
